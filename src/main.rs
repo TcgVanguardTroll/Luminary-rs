@@ -120,6 +120,16 @@ enum Commands {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
+    /// Manage name aliases (e.g. "Goldie McHawn" → "Goldie Blair")
+    Alias {
+        /// The alias name to add or look up
+        alias: Option<String>,
+        /// The canonical name it maps to (omit to look up or list all)
+        canonical: Option<String>,
+        /// Remove this alias instead of adding it
+        #[arg(long)]
+        remove: bool,
+    },
     /// Generate face embeddings for all performers missing one
     Embed,
     /// View or change settings
@@ -187,6 +197,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Similar { name, limit } => {
             similar(&db, &name, limit).await?;
+        }
+        Commands::Alias { alias, canonical, remove } => {
+            manage_alias(&db, alias, canonical, remove)?;
         }
         Commands::Embed => {
             embed_all(&db)?;
@@ -259,12 +272,20 @@ async fn add_performers(db: &Database, names: Vec<String>) -> anyhow::Result<()>
                 let source = performer.source.as_deref().unwrap_or("Unknown");
                 match db.add_performer(&performer) {
                     Ok(_) => {
-                        println!("\r{} {} {} {}",
+                        // Auto-save alias if user typed a different name than TPDB returned
+                        if name.to_lowercase() != performer.name.to_lowercase() {
+                            let _ = db.save_alias(&name, &performer.name);
+                        }
+
+                        println!("\r{} {} {}{}",
                             "[OK]".green(),
                             "Added:".white(),
-                            name.bright_white().bold(),
-                            format!("({}, {})", performer.body_type, source).bright_black()
+                            performer.name.bright_white().bold(),
+                            if name.to_lowercase() != performer.name.to_lowercase() {
+                                format!(" (alias: {})", name).bright_black().to_string()
+                            } else { String::new() }
                         );
+                        println!("     {}", format!("({}, {})", performer.body_type, source).bright_black());
                         // Try to generate face embedding silently
                         let face_url = performer.face_url.as_deref()
                             .or(performer.profile_image_url.as_deref());
@@ -781,6 +802,60 @@ async fn similar(db: &Database, name: &str, limit: usize) -> anyhow::Result<()> 
 
     println!();
     println!("{}", "Use 'luminary add <name>' to add any to your profile.".bright_black());
+    Ok(())
+}
+
+fn manage_alias(
+    db: &Database,
+    alias: Option<String>,
+    canonical: Option<String>,
+    remove: bool,
+) -> anyhow::Result<()> {
+    match (alias, canonical, remove) {
+        // List all aliases
+        (None, _, _) => {
+            let aliases = db.list_aliases()?;
+            if aliases.is_empty() {
+                println!("{}", "No aliases stored.".bright_black());
+            } else {
+                println!("{}", "Name Aliases".bright_cyan().bold());
+                println!("{}", "═".repeat(35).bright_black());
+                for (alias, canonical) in &aliases {
+                    println!("  {} {} {}",
+                        alias.bright_white(),
+                        "→".bright_black(),
+                        canonical.bright_white().bold()
+                    );
+                }
+            }
+        }
+        // Remove an alias
+        (Some(alias), _, true) => {
+            db.remove_alias(&alias)?;
+            println!("{} alias '{}'", "Removed".green(), alias);
+        }
+        // Add alias → canonical
+        (Some(alias), Some(canonical), false) => {
+            // Verify canonical exists
+            if db.get_performer(&canonical)?.is_none() {
+                println!("{} '{}' not found in database.", "Warning:".yellow(), canonical);
+            }
+            db.save_alias(&alias, &canonical)?;
+            println!("{} {} {} {}",
+                "Saved:".green(),
+                alias.bright_white(),
+                "→".bright_black(),
+                canonical.bright_white().bold()
+            );
+        }
+        // Look up what an alias resolves to
+        (Some(alias), None, false) => {
+            match db.resolve_alias(&alias)? {
+                Some(canonical) => println!("{} → {}", alias.bright_white(), canonical.bright_white().bold()),
+                None => println!("'{}' has no alias stored.", alias),
+            }
+        }
+    }
     Ok(())
 }
 

@@ -26,6 +26,14 @@ impl Database {
         );
 
         self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS aliases (
+                alias      TEXT PRIMARY KEY,
+                canonical  TEXT NOT NULL
+            )",
+            [],
+        )?;
+
+        self.conn.execute(
             "CREATE TABLE IF NOT EXISTS performers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
@@ -104,8 +112,55 @@ impl Database {
         Ok(self.conn.last_insert_rowid())
     }
 
-    /// Gets a performer by name, falling back to word-order-insensitive match
+    /// Saves a name alias pointing to a canonical performer name
+    pub fn save_alias(&self, alias: &str, canonical: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO aliases (alias, canonical) VALUES (?1, ?2)",
+            rusqlite::params![alias.to_lowercase(), canonical],
+        )?;
+        Ok(())
+    }
+
+    /// Resolves an alias to its canonical name, if one exists
+    pub fn resolve_alias(&self, name: &str) -> Result<Option<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT canonical FROM aliases WHERE alias = ?1"
+        )?;
+        let mut rows = stmt.query(rusqlite::params![name.to_lowercase()])?;
+        if let Some(row) = rows.next()? {
+            let canonical: String = row.get(0)?;
+            return Ok(Some(canonical));
+        }
+        Ok(None)
+    }
+
+    /// Lists all stored aliases
+    pub fn list_aliases(&self) -> Result<Vec<(String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT alias, canonical FROM aliases ORDER BY alias"
+        )?;
+        let pairs = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?.collect::<Result<Vec<_>, _>>()?;
+        Ok(pairs)
+    }
+
+    /// Removes an alias
+    pub fn remove_alias(&self, alias: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM aliases WHERE alias = ?1",
+            rusqlite::params![alias.to_lowercase()],
+        )?;
+        Ok(())
+    }
+
+    /// Gets a performer by name, falling back to alias → word-order match
     pub fn get_performer(&self, name: &str) -> Result<Option<Performer>> {
+        // Check alias table first
+        if let Some(canonical) = self.resolve_alias(name)? {
+            return self.get_performer(&canonical);
+        }
+
         // Exact match first
         let mut stmt = self.conn.prepare(
             "SELECT data FROM performers WHERE name = ?1"
