@@ -1,6 +1,11 @@
 // CLI command handlers naturally take many args (one per flag), and the
-// scored-result tuples are intentionally inline rather than newtype'd.
-#![allow(clippy::too_many_arguments, clippy::type_complexity)]
+// scored-result tuples are intentionally inline rather than newtype'd. The
+// Find subcommand has many optional flags, making its enum variant large.
+#![allow(
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::large_enum_variant
+)]
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -137,6 +142,12 @@ enum Commands {
     },
     /// Search by mixing attributes from stored performers or manual values
     Find {
+        /// Find performers like this one; use --match to pick face/body/both
+        #[arg(long)]
+        like: Option<String>,
+        /// What to match on for --like: face, body, or both (default: both)
+        #[arg(long = "match", value_parser = ["face", "body", "both"])]
+        match_mode: Option<String>,
         /// Copy face attributes (ethnicity, hair, eye) from this performer
         #[arg(long)]
         looks_like: Option<String>,
@@ -300,6 +311,8 @@ async fn main() -> anyhow::Result<()> {
             recommend(&db, limit, images).await?;
         }
         Commands::Find {
+            like,
+            match_mode,
             looks_like,
             body_like,
             hair,
@@ -318,8 +331,8 @@ async fn main() -> anyhow::Result<()> {
             limit,
         } => {
             find(
-                &db, looks_like, body_like, hair, eye, ethnicity, cup, hips, waist, whr, tattoo,
-                region, face_only, images, age_min, age_max, limit,
+                &db, like, match_mode, looks_like, body_like, hair, eye, ethnicity, cup, hips,
+                waist, whr, tattoo, region, face_only, images, age_min, age_max, limit,
             )
             .await?;
         }
@@ -877,6 +890,8 @@ async fn recommend(db: &Database, limit: usize, images: bool) -> anyhow::Result<
 
 async fn find(
     db: &Database,
+    like: Option<String>,
+    match_mode: Option<String>,
     looks_like: Option<String>,
     body_like: Option<String>,
     hair_arg: Option<String>,
@@ -897,6 +912,28 @@ async fn find(
     let cfg = config::Config::load();
     let api_key = cfg.resolve_api_key()?;
 
+    // `--like X --match <mode>` is the simple single-reference form; it maps onto
+    // the looks_like / body_like / face_only / blend machinery below.
+    let (mut looks_like, mut body_like, mut face_only) = (looks_like, body_like, face_only);
+    let mut blend = false;
+    if let Some(name) = like {
+        match match_mode.as_deref().unwrap_or("both") {
+            "face" => {
+                looks_like = Some(name);
+                face_only = true;
+            }
+            "body" => {
+                body_like = Some(name);
+            }
+            _ => {
+                // both: face ranking + body filters, scored as a 50/50 blend
+                looks_like = Some(name.clone());
+                body_like = Some(name);
+                blend = true;
+            }
+        }
+    }
+
     // Validate region up front so a typo fails fast with the valid options.
     if let Some(ref r) = region {
         if !luminary::region::known_regions().contains(&r.to_lowercase().as_str()) {
@@ -912,8 +949,8 @@ async fn find(
     let mut ethnicity = eth_arg;
     let mut hair = hair_arg;
     let mut eye = eye_arg;
-    let mut cup = cup_arg;
-    let mut hips = hips_arg;
+    let cup = cup_arg;
+    let hips = hips_arg;
     let mut waist = waist_arg;
     let mut whr = whr_arg;
 
@@ -948,27 +985,10 @@ async fn find(
         let p = db
             .get_performer(name)?
             .ok_or_else(|| anyhow::anyhow!("'{}' not in database", name))?;
-        if let Some(ref m) = p.measurements {
-            let parts: Vec<&str> = m.split('-').collect();
-            if cup.is_none() {
-                cup = parts
-                    .first()
-                    .map(|s| {
-                        s.trim_start_matches(|c: char| c.is_ascii_digit())
-                            .to_uppercase()
-                    })
-                    .filter(|s| !s.is_empty());
-            }
-            if hips.is_none() {
-                hips = parts.get(2).and_then(|s| {
-                    s.trim()
-                        .trim_end_matches(|c: char| !c.is_ascii_digit())
-                        .parse()
-                        .ok()
-                });
-            }
-        }
-        // WHR — the butt/build shape, a real filter (you're attracted to butt)
+        // Only WHR (the defining build shape) becomes a hard filter when derived
+        // from a reference. Cup, hips, height and weight are captured by the
+        // k-NN ranking instead, so we don't gate everyone out on an exact cup.
+        // (Explicit --cup / --hips still hard-filter — they're set before this.)
         if whr.is_none() {
             whr = recommender::performer_whr(&p);
         }
@@ -1150,7 +1170,17 @@ async fn find(
                 .is_some_and(|kw| recommender::has_tattoo(&p, kw));
             let stamp_bonus = if has_stamp { 5.0 } else { 0.0 };
 
-            let sort_key = if face_ranks {
+            let sort_key = if blend {
+                // "both": 50/50 blend of face and build similarity
+                match (face, body) {
+                    (Some(f), Some(b)) => {
+                        0.5 * embedder::similarity_pct(f) as f64 + 0.5 * b + stamp_bonus
+                    }
+                    (Some(f), None) => embedder::similarity_pct(f) as f64 + stamp_bonus,
+                    (None, Some(b)) => b + stamp_bonus,
+                    (None, None) => stamp_bonus,
+                }
+            } else if face_ranks {
                 match face {
                     // Face match: high band, ordered by facial similarity
                     Some(f) => 1000.0 + embedder::similarity_pct(f) as f64 + stamp_bonus,
