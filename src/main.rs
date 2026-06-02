@@ -143,6 +143,15 @@ enum Commands {
         /// Render a thumbnail image inline for each result
         #[arg(long, default_value_t = false)]
         images: bool,
+        /// Recommend separately per taste cluster (best for multi-modal taste)
+        #[arg(long, default_value_t = false)]
+        by_cluster: bool,
+    },
+    /// Detect and label your taste clusters (k-means over your library)
+    Clusters {
+        /// Number of clusters (default: auto from library size)
+        #[arg(long)]
+        k: Option<usize>,
     },
     /// Search by mixing attributes from stored performers or manual values
     Find {
@@ -321,8 +330,15 @@ async fn main() -> anyhow::Result<()> {
         Commands::Profile { mermaid } => {
             show_profile(&db, mermaid)?;
         }
-        Commands::Recommend { limit, images } => {
-            recommend(&db, limit, images).await?;
+        Commands::Recommend {
+            limit,
+            images,
+            by_cluster,
+        } => {
+            recommend(&db, limit, images, by_cluster).await?;
+        }
+        Commands::Clusters { k } => {
+            show_clusters(&db, k)?;
         }
         Commands::Find {
             like,
@@ -772,69 +788,43 @@ fn show_profile(db: &Database, mermaid: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn recommend(db: &Database, limit: usize, images: bool) -> anyhow::Result<()> {
-    let performers = db.get_all_performers()?;
-
-    if performers.is_empty() {
-        println!(
-            "{}",
-            "No performers in database yet. Add some with 'luminary add'.".yellow()
-        );
-        return Ok(());
-    }
-
-    let cfg = config::Config::load();
-    let api_key = cfg.resolve_api_key()?;
-
-    let known_names: std::collections::HashSet<String> =
-        performers.iter().map(|p| p.name.to_lowercase()).collect();
-
-    let tree = recommender::build_preference_tree(&performers);
+/// Core recommendation: score a TPDB candidate pool against a set of liked
+/// performers (tree + IDF), returning scored results sorted best-first.
+/// Reused by global `recommend` and per-cluster recommendation.
+async fn recommend_pool(
+    performers: &[models::Performer],
+    cfg: &config::Config,
+    api_key: &str,
+    known_names: &std::collections::HashSet<String>,
+) -> anyhow::Result<Vec<(f64, models::Performer)>> {
+    let tree = recommender::build_preference_tree(performers);
     let path = recommender::dominant_query_path(&tree);
-    // IDF weights: rare attributes among your likes count more than universal ones
-    let idf = recommender::compute_idf_weights(&performers);
-
-    println!(
-        "{}",
-        "Finding performers you might like...".bright_cyan().bold()
-    );
-    println!(
-        "{} {}",
-        "  Profile:".bright_black(),
-        path.join(" → ").bright_white().bold()
-    );
-    println!();
-
-    // Collect TPDB numeric IDs from liked performers
+    let idf = recommender::compute_idf_weights(performers);
     let liked_ids: Vec<i64> = performers.iter().filter_map(|p| p.tpdb_id).collect();
 
-    // Top cup size from preferences (most common cup among liked performers)
     let top_cup = performers
         .iter()
         .filter_map(|p| p.measurements.as_deref())
         .filter_map(|m| {
-            let bust = m.split('-').next()?;
-            let cup = bust.trim_start_matches(|c: char| c.is_ascii_digit());
-            if cup.is_empty() {
-                None
-            } else {
-                Some(cup.to_uppercase())
-            }
+            let cup = m
+                .split('-')
+                .next()?
+                .trim_start_matches(|c: char| c.is_ascii_digit());
+            (!cup.is_empty()).then(|| cup.to_uppercase())
         })
         .fold(
             std::collections::HashMap::<String, usize>::new(),
-            |mut acc, cup| {
-                *acc.entry(cup).or_insert(0) += 1;
-                acc
+            |mut a, c| {
+                *a.entry(c).or_insert(0) += 1;
+                a
             },
         )
         .into_iter()
         .max_by_key(|(_, v)| *v)
         .map(|(cup, _)| cup);
-
     let top_ethnicity = path.get(1).map(|s| s.as_str());
 
-    let client = TpdbClient::new(api_key);
+    let client = TpdbClient::new(api_key.to_string());
     let pool = client
         .get_recommendations(
             &liked_ids,
@@ -848,32 +838,14 @@ async fn recommend(db: &Database, limit: usize, images: bool) -> anyhow::Result<
         .into_iter()
         .filter(|p| !known_names.contains(&p.name.to_lowercase()))
         .map(|p| (recommender::score_performer_idf(&p, &tree, &idf), p))
-        .filter(|(score, _)| *score > 0.0)
+        .filter(|(s, _)| *s > 0.0)
         .collect();
-
-    // Sort best-match first
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    scored.truncate(limit);
+    Ok(scored)
+}
 
-    if scored.is_empty() {
-        println!(
-            "{}",
-            "No matching recommendations found. Try adding more performers to refine your profile."
-                .yellow()
-        );
-        return Ok(());
-    }
-
-    println!(
-        "{}",
-        format!("Top {} Recommendations for you:", scored.len())
-            .bright_cyan()
-            .bold()
-    );
-    println!();
-
-    let img_cache = if images { ImageCache::new().ok() } else { None };
-
+/// Prints a scored recommendation list (with profile links + optional images).
+async fn print_recs(scored: &[(f64, models::Performer)], img_cache: &Option<ImageCache>) {
     for (i, (score, p)) in scored.iter().enumerate() {
         let age_str = p
             .age
@@ -899,11 +871,106 @@ async fn recommend(db: &Database, limit: usize, images: bool) -> anyhow::Result<
         if let Some(url) = &p.source_url {
             println!("   {} {}", "↳".bright_black(), url.blue().underline());
         }
-        if let Some(cache) = &img_cache {
+        if let Some(cache) = img_cache {
             if let Some(url) = p.face_url.as_deref().or(p.profile_image_url.as_deref()) {
                 render_thumbnail(cache, url).await;
             }
         }
+    }
+}
+
+/// A short label for a cluster from its members' dominant traits.
+fn cluster_label(members: &[models::Performer]) -> String {
+    let mode = |vals: Vec<Option<String>>| -> Option<String> {
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for v in vals.into_iter().flatten() {
+            *counts.entry(v).or_insert(0) += 1;
+        }
+        counts.into_iter().max_by_key(|(_, c)| *c).map(|(k, _)| k)
+    };
+    let bt = mode(members.iter().map(|p| Some(p.body_type.clone())).collect());
+    let eth = mode(members.iter().map(|p| p.ethnicity.clone()).collect());
+    let hair = mode(members.iter().map(|p| p.hair_color.clone()).collect());
+    [bt, eth, hair]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+async fn recommend(
+    db: &Database,
+    limit: usize,
+    images: bool,
+    by_cluster: bool,
+) -> anyhow::Result<()> {
+    let performers = db.get_all_performers()?;
+    if performers.is_empty() {
+        println!(
+            "{}",
+            "No performers in database yet. Add some with 'luminary add'.".yellow()
+        );
+        return Ok(());
+    }
+
+    let cfg = config::Config::load();
+    let api_key = cfg.resolve_api_key()?;
+    let known_names: std::collections::HashSet<String> =
+        performers.iter().map(|p| p.name.to_lowercase()).collect();
+    let img_cache = if images { ImageCache::new().ok() } else { None };
+
+    if by_cluster {
+        let vecs: Vec<Vec<f32>> = performers.iter().map(recommender::cluster_vector).collect();
+        let k = auto_k(performers.len());
+        let assign = recommender::kmeans(&vecs, k);
+
+        println!(
+            "{}",
+            format!("Recommendations across your {} taste clusters:", k)
+                .bright_cyan()
+                .bold()
+        );
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for c in 0..k {
+            let members: Vec<models::Performer> = performers
+                .iter()
+                .zip(&assign)
+                .filter(|(_, &a)| a == c)
+                .map(|(p, _)| p.clone())
+                .collect();
+            if members.is_empty() {
+                continue;
+            }
+            println!();
+            println!(
+                "{}",
+                format!("◆ {} ({} of yours)", cluster_label(&members), members.len())
+                    .bright_white()
+                    .bold()
+            );
+            let mut scored = recommend_pool(&members, &cfg, &api_key, &known_names).await?;
+            scored.retain(|(_, p)| seen.insert(p.name.to_lowercase()));
+            scored.truncate(5);
+            if scored.is_empty() {
+                println!("  {}", "(no new matches)".bright_black());
+            } else {
+                print_recs(&scored, &img_cache).await;
+            }
+        }
+    } else {
+        println!(
+            "{}",
+            "Finding performers you might like...".bright_cyan().bold()
+        );
+        let mut scored = recommend_pool(&performers, &cfg, &api_key, &known_names).await?;
+        scored.truncate(limit);
+        if scored.is_empty() {
+            println!("{}", "No matching recommendations found.".yellow());
+            return Ok(());
+        }
+        println!();
+        print_recs(&scored, &img_cache).await;
     }
 
     println!();
@@ -911,7 +978,69 @@ async fn recommend(db: &Database, limit: usize, images: bool) -> anyhow::Result<
         "{}",
         "Use 'luminary add <name>' to add any to your profile.".bright_black()
     );
+    Ok(())
+}
 
+/// Auto-pick a cluster count from library size.
+fn auto_k(n: usize) -> usize {
+    (n / 8).clamp(2, 5)
+}
+
+/// Detect and print the taste clusters in the library.
+fn show_clusters(db: &Database, k: Option<usize>) -> anyhow::Result<()> {
+    let performers = db.get_all_performers()?;
+    if performers.len() < 2 {
+        println!("{}", "Add a few more performers to find clusters.".yellow());
+        return Ok(());
+    }
+    let vecs: Vec<Vec<f32>> = performers.iter().map(recommender::cluster_vector).collect();
+    let k = k.unwrap_or_else(|| auto_k(performers.len()));
+    let assign = recommender::kmeans(&vecs, k);
+
+    println!(
+        "{}",
+        format!(
+            "Your taste clusters ({} from {} performers)",
+            k,
+            performers.len()
+        )
+        .bright_cyan()
+        .bold()
+    );
+
+    for c in 0..k {
+        let members: Vec<&models::Performer> = performers
+            .iter()
+            .zip(&assign)
+            .filter(|(_, &a)| a == c)
+            .map(|(p, _)| p)
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let owned: Vec<models::Performer> = members.iter().map(|p| (*p).clone()).collect();
+        println!();
+        println!(
+            "{}",
+            format!("◆ {} ({})", cluster_label(&owned), members.len())
+                .bright_white()
+                .bold()
+        );
+        println!(
+            "  {}",
+            members
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+                .bright_black()
+        );
+    }
+    println!();
+    println!(
+        "{}",
+        "Tip: 'luminary recommend --by-cluster' recommends per cluster.".bright_black()
+    );
     Ok(())
 }
 

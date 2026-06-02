@@ -392,6 +392,122 @@ fn str_to_id(val: Option<&str>, options: &[&str]) -> f64 {
         .unwrap_or(0.5)
 }
 
+fn body_type_id(p: &Performer) -> f64 {
+    let order = ["Petite", "Slim", "Average", "Curvy", "Full-Figured", "BBW"];
+    order
+        .iter()
+        .position(|&o| o == p.body_type)
+        .map(|i| i as f64 / (order.len() - 1) as f64)
+        .unwrap_or(0.5)
+}
+
+// ── Clustering: detect taste sub-types ────────────────────────────────────────
+//
+// A weighted feature vector per performer for k-means. Body type / ethnicity /
+// hair dominate (that's how the tree splits), with build + age as finer signal.
+// Always returns a vector (neutral defaults for missing data) so every
+// performer can be clustered.
+
+const ETHNICITIES: &[&str] = &[
+    "Asian",
+    "Black",
+    "Caucasian",
+    "Indian",
+    "Latin",
+    "Middle Eastern",
+    "Mixed",
+];
+const HAIRS: &[&str] = &[
+    "Auburn", "Bald", "Black", "Blonde", "Brunette", "Grey", "Red", "Various", "White",
+];
+
+pub fn cluster_vector(p: &Performer) -> Vec<f32> {
+    let whr = performer_whr(p).unwrap_or(0.72);
+    let inv_whr = (1.0 - whr.clamp(0.5, 1.0) / 0.5).clamp(0.0, 1.0);
+    vec![
+        (body_type_id(p) * 3.0) as f32, // primary split
+        (str_to_id(p.ethnicity.as_deref(), ETHNICITIES) * 2.0) as f32,
+        (str_to_id(p.hair_color.as_deref(), HAIRS) * 1.5) as f32,
+        (age_f64(p) * 1.0) as f32,
+        (inv_whr * 1.5) as f32,
+        (hip_f64(p).unwrap_or(0.4) * 1.0) as f32,
+        (cup_score_f64(p) * 1.0) as f32,
+        (height_f64(p) * 1.0) as f32,
+    ]
+}
+
+fn dist2(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum()
+}
+
+/// k-means clustering. Deterministic farthest-point init (reproducible, no RNG).
+/// Returns a cluster id per input point.
+pub fn kmeans(points: &[Vec<f32>], k: usize) -> Vec<usize> {
+    let n = points.len();
+    if n == 0 || k == 0 {
+        return vec![0; n];
+    }
+    let k = k.min(n);
+    let dims = points[0].len();
+
+    // Init: point 0, then repeatedly the point farthest from all chosen centroids.
+    let mut centroids: Vec<Vec<f32>> = vec![points[0].clone()];
+    while centroids.len() < k {
+        let mut best = 0usize;
+        let mut best_d = -1.0_f32;
+        for (i, p) in points.iter().enumerate() {
+            let d = centroids
+                .iter()
+                .map(|c| dist2(p, c))
+                .fold(f32::MAX, f32::min);
+            if d > best_d {
+                best_d = d;
+                best = i;
+            }
+        }
+        centroids.push(points[best].clone());
+    }
+
+    let mut assign = vec![0usize; n];
+    for _ in 0..50 {
+        let mut changed = false;
+        for (i, p) in points.iter().enumerate() {
+            let mut bj = 0usize;
+            let mut bd = f32::MAX;
+            for (j, c) in centroids.iter().enumerate() {
+                let d = dist2(p, c);
+                if d < bd {
+                    bd = d;
+                    bj = j;
+                }
+            }
+            if assign[i] != bj {
+                assign[i] = bj;
+                changed = true;
+            }
+        }
+        let mut sums = vec![vec![0.0_f32; dims]; k];
+        let mut counts = vec![0usize; k];
+        for (i, p) in points.iter().enumerate() {
+            counts[assign[i]] += 1;
+            for d in 0..dims {
+                sums[assign[i]][d] += p[d];
+            }
+        }
+        for j in 0..k {
+            if counts[j] > 0 {
+                for d in 0..dims {
+                    centroids[j][d] = sums[j][d] / counts[j] as f32;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    assign
+}
+
 /// Encodes a performer as a normalised feature vector for k-NN.
 /// Returns None if insufficient measurement data.
 pub fn feature_vector(p: &Performer) -> Option<FeatureVec> {
@@ -802,6 +918,59 @@ mod tests {
         assert_eq!(age_bucket(30), "26-35");
         assert_eq!(age_bucket(40), "36-45");
         assert_eq!(age_bucket(55), "46+");
+    }
+
+    #[test]
+    fn kmeans_separates_two_groups() {
+        // Two well-separated clusters of body-type vectors.
+        let people = [
+            perf(
+                "a",
+                "Curvy",
+                "Caucasian",
+                "Blonde",
+                "Green",
+                50,
+                "34DD-26-36",
+                None,
+            ),
+            perf(
+                "b",
+                "Curvy",
+                "Caucasian",
+                "Blonde",
+                "Blue",
+                48,
+                "34DD-25-36",
+                None,
+            ),
+            perf(
+                "c",
+                "Full-Figured",
+                "Asian",
+                "Black",
+                "Brown",
+                35,
+                "38G-30-44",
+                None,
+            ),
+            perf(
+                "d",
+                "Full-Figured",
+                "Asian",
+                "Black",
+                "Brown",
+                36,
+                "38G-31-45",
+                None,
+            ),
+        ];
+        let vecs: Vec<Vec<f32>> = people.iter().map(cluster_vector).collect();
+        let assign = kmeans(&vecs, 2);
+        // a,b land together; c,d land together; the two pairs differ.
+        assert_eq!(assign[0], assign[1]);
+        assert_eq!(assign[2], assign[3]);
+        assert_ne!(assign[0], assign[2]);
     }
 
     #[test]
