@@ -3,8 +3,14 @@
 Generates ArcFace face embeddings from image URLs using InsightFace + ONNX Runtime.
 No TensorFlow required — works with Python 3.14+.
 
-Called by luminary: python face_embed.py <image_url>
-Output: JSON {"embedding": [...512 floats...]} or {"error": "message"}
+Usage:  python face_embed.py <url1> [url2 url3 ...]
+
+The model is loaded ONCE per invocation, so passing many URLs at once is far
+cheaper than one call per image (model load dominates per-call cost). Uses the
+CUDA execution provider automatically when available, else CPU.
+
+Output: a JSON array, one entry per input URL, in order:
+    [{"embedding": [...512 floats...]}, {"error": "No face detected"}, ...]
 
 First run downloads the buffalo_l model (~300 MB, cached after that).
 """
@@ -15,82 +21,70 @@ import tempfile
 import urllib.request
 
 
-def main():
-    if len(sys.argv) != 2:
-        print(json.dumps({"error": "Usage: face_embed.py <image_url>"}))
-        sys.exit(1)
+def download(url):
+    ext = url.split(".")[-1].split("?")[0].lower()
+    if ext not in ("jpg", "jpeg", "png", "webp"):
+        ext = "jpg"
+    fd, path = tempfile.mkstemp(suffix=f".{ext}")
+    os.close(fd)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Luminary)"})
+    with urllib.request.urlopen(req, timeout=30) as r, open(path, "wb") as f:
+        f.write(r.read())
+    return path
 
-    url = sys.argv[1]
+
+def main():
+    urls = sys.argv[1:]
+    if not urls:
+        print(json.dumps([{"error": "Usage: face_embed.py <url> [url ...]"}]))
+        sys.exit(1)
 
     try:
         import cv2
-        import numpy as np
         from insightface.app import FaceAnalysis
+        import onnxruntime as ort
     except ImportError as e:
-        print(json.dumps({
-            "error": f"Missing dependency: {e}. Run: pip install insightface onnxruntime opencv-python"
-        }))
+        err = {"error": f"Missing dependency: {e}. Run: pip install insightface onnxruntime opencv-python"}
+        print(json.dumps([err] * len(urls)))
         sys.exit(1)
 
-    tmp = None
+    # Prefer GPU (CUDA) when the installed onnxruntime exposes it; else CPU.
+    available = ort.get_available_providers()
+    providers = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider") if p in available]
+    if not providers:
+        providers = ["CPUExecutionProvider"]
+
+    # Load the model ONCE — this is the expensive part we amortise across URLs.
+    _real_stdout = sys.stdout
+    sys.stdout = sys.stderr
     try:
-        # Download image to temp file
-        ext = url.split(".")[-1].split("?")[0].lower()
-        if ext not in ("jpg", "jpeg", "png", "webp"):
-            ext = "jpg"
-        with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as f:
-            tmp = f.name
-
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (Starfinder)"},
-        )
-        with urllib.request.urlopen(req, timeout=30) as r, open(tmp, "wb") as f:
-            f.write(r.read())
-
-        # Load image
-        img = cv2.imread(tmp)
-        if img is None:
-            print(json.dumps({"error": "Could not decode image"}))
-            return
-
-        # Initialise InsightFace — redirect its stdout chatter to stderr
-        import io
-        _real_stdout = sys.stdout
-        sys.stdout = sys.stderr
-        try:
-            app = FaceAnalysis(
-                name="buffalo_l",
-                providers=["CPUExecutionProvider"],
-            )
-            app.prepare(ctx_id=0, det_size=(640, 640))
-        finally:
-            sys.stdout = _real_stdout
-
-        faces = app.get(img)
-
-        if not faces:
-            _real_stdout = sys.stdout
-            sys.stdout = sys.stderr
-            try:
-                app.prepare(ctx_id=0, det_size=(320, 320))
-            finally:
-                sys.stdout = _real_stdout
-            faces = app.get(img)
-
-        if faces:
-            # Use the largest detected face (most prominent)
-            face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-            embedding = face.embedding.tolist()
-            print(json.dumps({"embedding": embedding}))
-        else:
-            print(json.dumps({"error": "No face detected in image"}))
-
-    except Exception as e:
-        print(json.dumps({"error": str(e)}))
+        app = FaceAnalysis(name="buffalo_l", providers=providers)
+        app.prepare(ctx_id=0, det_size=(640, 640))
     finally:
-        if tmp and os.path.exists(tmp):
-            os.unlink(tmp)
+        sys.stdout = _real_stdout
+
+    results = []
+    for url in urls:
+        tmp = None
+        try:
+            tmp = download(url)
+            img = cv2.imread(tmp)
+            if img is None:
+                results.append({"error": "Could not decode image"})
+                continue
+            faces = app.get(img)
+            if faces:
+                face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+                results.append({"embedding": face.embedding.tolist()})
+            else:
+                results.append({"error": "No face detected"})
+        except Exception as e:
+            results.append({"error": str(e)})
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
+
+    print(json.dumps(results))
 
 
 if __name__ == "__main__":

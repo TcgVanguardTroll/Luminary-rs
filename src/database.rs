@@ -2,6 +2,17 @@ use crate::models::{Performer, SearchFilters};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 
+/// Decodes an embedding column value, accepting both the new f32 BLOB format
+/// and legacy JSON text rows transparently.
+fn decode_embedding(val: rusqlite::types::Value) -> Option<Vec<f32>> {
+    use rusqlite::types::Value;
+    match val {
+        Value::Blob(b) => crate::embedder::blob_to_embedding(&b),
+        Value::Text(t) => crate::embedder::blob_to_embedding(t.as_bytes()),
+        _ => None,
+    }
+}
+
 /// Database manager for storing performers
 pub struct Database {
     conn: Connection,
@@ -123,7 +134,7 @@ impl Database {
     /// Upserts a candidate (with its face embedding) into the local corpus.
     pub fn save_candidate(&self, p: &crate::models::Performer, embedding: &[f32]) -> Result<()> {
         let data = serde_json::to_string(p)?;
-        let emb = serde_json::to_string(embedding)?;
+        let emb = crate::embedder::embedding_to_blob(embedding);
         self.conn.execute(
             "INSERT OR REPLACE INTO candidates (name, data, embedding) VALUES (?1, ?2, ?3)",
             rusqlite::params![p.name, data, emb],
@@ -142,8 +153,8 @@ impl Database {
             .prepare("SELECT embedding FROM candidates WHERE name = ?1")?;
         let mut rows = stmt.query(rusqlite::params![name])?;
         if let Some(row) = rows.next()? {
-            let s: String = row.get(0)?;
-            return Ok(serde_json::from_str(&s).ok());
+            let val: rusqlite::types::Value = row.get(0)?;
+            return Ok(decode_embedding(val));
         }
         Ok(None)
     }
@@ -163,16 +174,16 @@ impl Database {
         let rows = stmt
             .query_map([], |row| {
                 let data: String = row.get(0)?;
-                let emb: String = row.get(1)?;
-                Ok((data, emb))
+                let val: rusqlite::types::Value = row.get(1)?;
+                Ok((data, val))
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut out = Vec::with_capacity(rows.len());
-        for (data, emb) in rows {
-            if let (Ok(p), Ok(e)) = (
+        for (data, val) in rows {
+            if let (Ok(p), Some(e)) = (
                 serde_json::from_str::<crate::models::Performer>(&data),
-                serde_json::from_str::<Vec<f32>>(&emb),
+                decode_embedding(val),
             ) {
                 out.push((e, p));
             }
@@ -327,28 +338,25 @@ impl Database {
         Ok(performers)
     }
 
-    /// Saves a face embedding for a performer (JSON-serialised Vec<f32>)
+    /// Saves a face embedding for a performer as a compact f32 BLOB.
     pub fn save_embedding(&self, name: &str, embedding: &[f32]) -> Result<()> {
-        let json = serde_json::to_string(embedding)?;
+        let blob = crate::embedder::embedding_to_blob(embedding);
         self.conn.execute(
             "UPDATE performers SET embedding = ?1 WHERE name = ?2",
-            rusqlite::params![json, name],
+            rusqlite::params![blob, name],
         )?;
         Ok(())
     }
 
-    /// Retrieves the stored face embedding for a performer
+    /// Retrieves the stored face embedding for a performer (BLOB or legacy JSON).
     pub fn get_embedding(&self, name: &str) -> Result<Option<Vec<f32>>> {
         let mut stmt = self
             .conn
             .prepare("SELECT embedding FROM performers WHERE name = ?1")?;
         let mut rows = stmt.query(rusqlite::params![name])?;
         if let Some(row) = rows.next()? {
-            let json: Option<String> = row.get(0)?;
-            if let Some(s) = json {
-                let emb: Vec<f32> = serde_json::from_str(&s)?;
-                return Ok(Some(emb));
-            }
+            let val: rusqlite::types::Value = row.get(0)?;
+            return Ok(decode_embedding(val));
         }
         Ok(None)
     }

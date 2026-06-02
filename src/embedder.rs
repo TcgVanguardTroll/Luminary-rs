@@ -2,16 +2,22 @@ use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
 
-/// Calls face_embed.py to generate a 512-dim ArcFace embedding for an image URL.
-pub fn generate_embedding(image_url: &str) -> Result<Vec<f32>> {
+/// Generates ArcFace embeddings for many image URLs in ONE sidecar call.
+/// The Python model loads once and processes all URLs, so this is far cheaper
+/// than calling `generate_embedding` per image. Returns one slot per input URL,
+/// in order: `Some(vec)` on success, `None` if no face was detected/decoded.
+pub fn generate_embeddings(image_urls: &[String]) -> Result<Vec<Option<Vec<f32>>>> {
+    if image_urls.is_empty() {
+        return Ok(Vec::new());
+    }
     let script = find_script()?;
     let python = find_python()?;
 
-    log::info!("Generating face embedding: {}", image_url);
+    log::info!("Embedding {} image(s) in one batch", image_urls.len());
 
     let output = Command::new(&python)
         .arg(&script)
-        .arg(image_url)
+        .args(image_urls)
         .output()
         .with_context(|| format!("Failed to run {} {}", python, script.display()))?;
 
@@ -24,25 +30,30 @@ pub fn generate_embedding(image_url: &str) -> Result<Vec<f32>> {
         );
     }
 
-    let result: serde_json::Value = serde_json::from_str(stdout.trim())
+    let arr: Vec<serde_json::Value> = serde_json::from_str(stdout.trim())
         .with_context(|| format!("Could not parse face_embed.py output: {}", stdout))?;
 
-    if let Some(err) = result.get("error").and_then(|e| e.as_str()) {
-        anyhow::bail!("{}", err);
-    }
+    Ok(arr
+        .into_iter()
+        .map(|entry| {
+            entry.get("embedding").and_then(|e| e.as_array()).map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect::<Vec<f32>>()
+            })
+        })
+        .map(|opt| opt.filter(|v| !v.is_empty()))
+        .collect())
+}
 
-    let embedding: Vec<f32> = result["embedding"]
-        .as_array()
-        .context("No 'embedding' field in face_embed.py output")?
-        .iter()
-        .filter_map(|v| v.as_f64().map(|f| f as f32))
-        .collect();
-
-    if embedding.is_empty() {
-        anyhow::bail!("Empty embedding returned from face_embed.py");
-    }
-
-    Ok(embedding)
+/// Generates a single embedding (convenience wrapper over the batch API).
+pub fn generate_embedding(image_url: &str) -> Result<Vec<f32>> {
+    let urls = [image_url.to_string()];
+    generate_embeddings(&urls)?
+        .into_iter()
+        .next()
+        .flatten()
+        .context("No face detected in image")
 }
 
 /// L2-normalises a vector in place (unit length).
@@ -60,23 +71,23 @@ fn normalize(v: &mut [f32]) {
 /// so no single photo dominates. More angles/lighting ⇒ a more robust face
 /// signature. Returns None if no image yielded a detectable face.
 pub fn generate_centroid_embedding(image_urls: &[String]) -> Option<Vec<f32>> {
+    // One batched sidecar call for all images (model loads once).
+    let embeddings = generate_embeddings(image_urls).ok()?;
+
     let mut sum: Vec<f32> = Vec::new();
     let mut count = 0usize;
-
-    for url in image_urls {
-        if let Ok(mut emb) = generate_embedding(url) {
-            normalize(&mut emb);
-            if sum.is_empty() {
-                sum = emb;
-            } else if sum.len() == emb.len() {
-                for (s, e) in sum.iter_mut().zip(emb.iter()) {
-                    *s += *e;
-                }
-            } else {
-                continue; // dimension mismatch, skip
+    for mut emb in embeddings.into_iter().flatten() {
+        normalize(&mut emb);
+        if sum.is_empty() {
+            sum = emb;
+        } else if sum.len() == emb.len() {
+            for (s, e) in sum.iter_mut().zip(emb.iter()) {
+                *s += *e;
             }
-            count += 1;
+        } else {
+            continue; // dimension mismatch, skip
         }
+        count += 1;
     }
 
     if count == 0 {
@@ -109,15 +120,30 @@ pub fn similarity_pct(sim: f32) -> f32 {
     ((sim + 1.0) / 2.0 * 100.0).clamp(0.0, 100.0)
 }
 
+/// Serialises an embedding to a compact little-endian f32 BLOB (~4x smaller
+/// and faster to parse than JSON text).
 pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
-    serde_json::to_string(embedding)
-        .unwrap_or_default()
-        .into_bytes()
+    let mut out = Vec::with_capacity(embedding.len() * 4);
+    for f in embedding {
+        out.extend_from_slice(&f.to_le_bytes());
+    }
+    out
 }
 
+/// Decodes an embedding BLOB. Backward-compatible: if the bytes are actually
+/// legacy JSON text (start with '['), parse that instead.
 pub fn blob_to_embedding(blob: &[u8]) -> Option<Vec<f32>> {
-    let s = std::str::from_utf8(blob).ok()?;
-    serde_json::from_str(s).ok()
+    if blob.first() == Some(&b'[') {
+        return serde_json::from_slice(blob).ok();
+    }
+    if blob.is_empty() || !blob.len().is_multiple_of(4) {
+        return None;
+    }
+    Some(
+        blob.chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect(),
+    )
 }
 
 fn find_python() -> Result<String> {
@@ -192,6 +218,15 @@ mod tests {
     fn blob_round_trip() {
         let v = vec![0.5_f32, -0.25, 1.0];
         let blob = embedding_to_blob(&v);
+        // f32 LE bytes: 3 floats × 4 bytes
+        assert_eq!(blob.len(), 12);
         assert_eq!(blob_to_embedding(&blob), Some(v));
+    }
+
+    #[test]
+    fn blob_reads_legacy_json() {
+        // Old rows stored embeddings as JSON text — must still decode.
+        let legacy = b"[0.5,-0.25,1.0]";
+        assert_eq!(blob_to_embedding(legacy), Some(vec![0.5_f32, -0.25, 1.0]));
     }
 }

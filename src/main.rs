@@ -1570,21 +1570,28 @@ async fn warm(db: &Database, limit: usize) -> anyhow::Result<()> {
         .get_recommendations(&liked_ids, top_ethnicity, None, &cfg.gender_filter)
         .await?;
 
+    // Collect new candidates + their best image URL, then embed them all in ONE
+    // batched sidecar call (model loads once instead of per-candidate).
+    let targets: Vec<(models::Performer, String)> = pool
+        .into_iter()
+        .filter(|p| !known.contains(&p.name.to_lowercase()))
+        .filter_map(|p| {
+            p.face_url
+                .clone()
+                .or_else(|| p.profile_image_url.clone())
+                .map(|u| (p, u))
+        })
+        .take(limit)
+        .collect();
+
+    let urls: Vec<String> = targets.iter().map(|(_, u)| u.clone()).collect();
+    let embeddings = embedder::generate_embeddings(&urls).unwrap_or_default();
+
     let mut done = 0usize;
-    for p in pool {
-        if done >= limit {
-            break;
-        }
-        if known.contains(&p.name.to_lowercase()) {
-            continue;
-        }
-        if let Some(url) = p.face_url.as_deref().or(p.profile_image_url.as_deref()) {
-            if let Ok(emb) = embedder::generate_embedding(url) {
-                db.save_candidate(&p, &emb)?;
-                done += 1;
-                print!("{}", "·".bright_green());
-                std::io::Write::flush(&mut std::io::stdout()).ok();
-            }
+    for ((p, _), emb) in targets.iter().zip(embeddings) {
+        if let Some(e) = emb {
+            db.save_candidate(p, &e)?;
+            done += 1;
         }
     }
 
@@ -1654,7 +1661,8 @@ async fn face_search(
             )
             .await?;
 
-        let mut embedded = 0usize;
+        // Gather new candidates + a face image, then embed in one batched call.
+        let mut targets: Vec<(models::Performer, String)> = Vec::new();
         for p in pool {
             if p.name.to_lowercase() == reference.name.to_lowercase() {
                 continue;
@@ -1662,16 +1670,20 @@ async fn face_search(
             if db.get_embedding_any(&p.name)?.is_some() {
                 continue; // already in corpus
             }
-            if let Some(url) = p.profile_image_url.as_deref().or(p.face_url.as_deref()) {
-                if let Ok(e) = embedder::generate_embedding(url) {
-                    db.save_candidate(&p, &e)?;
-                    embedded += 1;
-                    print!("{}", "·".bright_green());
-                    std::io::Write::flush(&mut std::io::stdout()).ok();
-                }
+            if let Some(url) = p.profile_image_url.clone().or_else(|| p.face_url.clone()) {
+                targets.push((p, url));
             }
         }
-        println!();
+
+        let urls: Vec<String> = targets.iter().map(|(_, u)| u.clone()).collect();
+        let embeddings = embedder::generate_embeddings(&urls).unwrap_or_default();
+        let mut embedded = 0usize;
+        for ((p, _), emb) in targets.iter().zip(embeddings) {
+            if let Some(e) = emb {
+                db.save_candidate(p, &e)?;
+                embedded += 1;
+            }
+        }
         println!(
             "{}",
             format!("  +{} new StashDB faces", embedded).bright_black()
