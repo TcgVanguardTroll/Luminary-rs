@@ -97,6 +97,6 @@ fn find_script() -> Result<PathBuf> {
     candidates.into_iter()
         .find(|p| p.exists())
         .ok_or_else(|| anyhow::anyhow!(
-            "face_embed.py not found. Place it alongside the starfinder binary."
+            "face_embed.py not found. Place it alongside the luminary binary."
         ))
 }

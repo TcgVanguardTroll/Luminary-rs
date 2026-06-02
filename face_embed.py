@@ -3,7 +3,7 @@
 Generates ArcFace face embeddings from image URLs using InsightFace + ONNX Runtime.
 No TensorFlow required — works with Python 3.14+.
 
-Called by starfinder: python face_embed.py <image_url>
+Called by luminary: python face_embed.py <image_url>
 Output: JSON {"embedding": [...512 floats...]} or {"error": "message"}
 
 First run downloads the buffalo_l model (~300 MB, cached after that).

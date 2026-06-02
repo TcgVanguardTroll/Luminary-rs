@@ -97,7 +97,7 @@ impl Config {
     fn path() -> Result<PathBuf> {
         let dir = dirs::data_local_dir()
             .context("Could not find data directory")?
-            .join("starfinder");
+            .join("luminary");
         std::fs::create_dir_all(&dir)?;
         Ok(dir.join("config.json"))
     }

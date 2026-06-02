@@ -12,7 +12,7 @@ impl ImageCache {
     pub fn new() -> Result<Self> {
         let cache_dir = dirs::cache_dir()
             .context("Could not find cache directory")?
-            .join("starfinder")
+            .join("luminary")
             .join("images");
 
         std::fs::create_dir_all(&cache_dir)

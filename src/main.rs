@@ -17,7 +17,7 @@ use scraper::Scraper;
 use tpdb::TpdbClient;
 
 #[derive(Parser)]
-#[command(name = "starfinder")]
+#[command(name = "luminary")]
 #[command(about = "Find your stars - A Rust-powered recommendation engine", long_about = None)]
 #[command(version)]
 struct Cli {
@@ -202,9 +202,9 @@ async fn main() -> anyhow::Result<()> {
 fn get_db_path() -> anyhow::Result<String> {
     let data_dir = dirs::data_local_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not find data directory"))?;
-    let db_dir = data_dir.join("starfinder");
+    let db_dir = data_dir.join("luminary");
     std::fs::create_dir_all(&db_dir)?;
-    Ok(db_dir.join("starfinder.db").to_string_lossy().to_string())
+    Ok(db_dir.join("luminary.db").to_string_lossy().to_string())
 }
 
 async fn add_performers(db: &Database, names: Vec<String>) -> anyhow::Result<()> {
@@ -295,7 +295,7 @@ async fn add_performers(db: &Database, names: Vec<String>) -> anyhow::Result<()>
     }
 
     println!();
-    println!("{}", "Tip: Use 'starfinder search' to find similar performers".bright_black());
+    println!("{}", "Tip: Use 'luminary search' to find similar performers".bright_black());
     Ok(())
 }
 
@@ -304,7 +304,7 @@ fn list_performers(db: &Database) -> anyhow::Result<()> {
 
     if performers.is_empty() {
         println!("{}", "No performers in database yet.".yellow());
-        println!("{}", "Use 'starfinder add <names...>' to add some!".bright_black());
+        println!("{}", "Use 'luminary add <names...>' to add some!".bright_black());
         return Ok(());
     }
 
@@ -410,7 +410,7 @@ fn show_stats(db: &Database) -> anyhow::Result<()> {
     let cache_size = cache.cache_size()?;
     let cache_count = cache.cache_count()?;
 
-    println!("{}", "Starfinder Statistics".bright_cyan().bold());
+    println!("{}", "Luminary Statistics".bright_cyan().bold());
     println!();
     println!("  {} {}", "Performers:".bright_black(), count.to_string().bright_white());
     println!("  {} {}", "Cached Images:".bright_black(), cache_count.to_string().bright_white());
@@ -432,7 +432,7 @@ fn show_profile(db: &Database) -> anyhow::Result<()> {
     let performers = db.get_all_performers()?;
 
     if performers.is_empty() {
-        println!("{}", "No performers in database yet. Add some with 'starfinder add'.".yellow());
+        println!("{}", "No performers in database yet. Add some with 'luminary add'.".yellow());
         return Ok(());
     }
 
@@ -466,7 +466,7 @@ async fn recommend(db: &Database, limit: usize) -> anyhow::Result<()> {
     let performers = db.get_all_performers()?;
 
     if performers.is_empty() {
-        println!("{}", "No performers in database yet. Add some with 'starfinder add'.".yellow());
+        println!("{}", "No performers in database yet. Add some with 'luminary add'.".yellow());
         return Ok(());
     }
 
@@ -556,7 +556,7 @@ async fn recommend(db: &Database, limit: usize) -> anyhow::Result<()> {
     }
 
     println!();
-    println!("{}", "Use 'starfinder add <name>' to add any to your profile.".bright_black());
+    println!("{}", "Use 'luminary add <name>' to add any to your profile.".bright_black());
 
     Ok(())
 }
@@ -718,15 +718,15 @@ async fn find(
     }
     println!();
     if !using_face_ml && looks_like.is_some() {
-        println!("{}", "  Tip: run 'starfinder embed' to generate face embeddings for ML-powered face similarity".bright_black());
+        println!("{}", "  Tip: run 'luminary embed' to generate face embeddings for ML-powered face similarity".bright_black());
     }
-    println!("{}", "Use 'starfinder add <name>' to add any to your profile.".bright_black());
+    println!("{}", "Use 'luminary add <name>' to add any to your profile.".bright_black());
     Ok(())
 }
 
 async fn similar(db: &Database, name: &str, limit: usize) -> anyhow::Result<()> {
     let performer = db.get_performer(name)?
-        .ok_or_else(|| anyhow::anyhow!("'{}' not found in your database. Add them first with 'starfinder add'.", name))?;
+        .ok_or_else(|| anyhow::anyhow!("'{}' not found in your database. Add them first with 'luminary add'.", name))?;
 
     let tpdb_uuid = performer.source_url
         .as_deref()
@@ -780,7 +780,7 @@ async fn similar(db: &Database, name: &str, limit: usize) -> anyhow::Result<()> 
     }
 
     println!();
-    println!("{}", "Use 'starfinder add <name>' to add any to your profile.".bright_black());
+    println!("{}", "Use 'luminary add <name>' to add any to your profile.".bright_black());
     Ok(())
 }
 
@@ -836,7 +836,7 @@ fn configure(key: Option<String>, value: Option<String>) -> anyhow::Result<()> {
     match (key.as_deref(), value.as_deref()) {
         (None, _) => {
             // Show current config
-            println!("{}", "Starfinder Settings".bright_cyan().bold());
+            println!("{}", "Luminary Settings".bright_cyan().bold());
             println!("{}", "═".repeat(35).bright_black());
             println!("  {} {}",
                 "gender:".bright_black(),

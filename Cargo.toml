@@ -1,16 +1,16 @@
 [package]
-name = "starfinder"
+name = "luminary"
 version = "0.1.0"
 edition = "2021"
 authors = ["Jordan Grant <jordangrant46@gmail.com>"]
-description = "A privacy-focused recommendation engine for discovering content you'll love"
+description = "A privacy-focused recommendation engine for discovering adult performers you'll love"
 license = "MIT"
-repository = "https://github.com/TcgVanguardTroll/starfinder-rs"
-keywords = ["recommendation", "cli", "discovery", "preferences", "similarity"]
+repository = "https://github.com/TcgVanguardTroll/luminary-rs"
+keywords = ["recommendation", "cli", "face-recognition", "arcface", "similarity"]
 categories = ["command-line-utilities", "algorithms"]
 
 [[bin]]
-name = "starfinder"
+name = "luminary"
 path = "src/main.rs"
 
 [dependencies]

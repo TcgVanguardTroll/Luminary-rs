@@ -1,4 +1,4 @@
-# Starfinder
+# Luminary
 
 > Privacy-first CLI recommendation engine for discovering adult performers you'll enjoy — built in Rust, powered by [ThePornDB](https://theporndb.net) and ArcFace face recognition.
 
@@ -39,12 +39,12 @@ Face similarity is optional — all other commands work without Python.
 ## Installation
 
 ```powershell
-git clone https://github.com/TcgVanguardTroll/Starfinder-rs.git
-cd Starfinder-rs
+git clone https://github.com/TcgVanguardTroll/Luminary-rs.git
+cd Luminary-rs
 cargo build --release
 ```
 
-Binary: `target/release/starfinder.exe`
+Binary: `target/release/luminary.exe`
 
 Set your API key (add to your profile to persist):
 
@@ -58,16 +58,16 @@ $env:TPDB_API_KEY = "your-key-here"
 
 ```powershell
 # Add performers you like
-starfinder add "Naughty Alysha" "Seka Black" "Dee Siren" "Lisa Ann"
+luminary add "Naughty Alysha" "Seka Black" "Dee Siren" "Lisa Ann"
 
 # See your taste profile
-starfinder profile
+luminary profile
 
 # Get recommendations
-starfinder recommend
+luminary recommend
 
 # Find performers with Naughty Alysha's face and Lisa Ann's body
-starfinder find --looks-like "Naughty Alysha" --body-like "Lisa Ann"
+luminary find --looks-like "Naughty Alysha" --body-like "Lisa Ann"
 ```
 
 ---
@@ -77,18 +77,18 @@ starfinder find --looks-like "Naughty Alysha" --body-like "Lisa Ann"
 ### Managing your library
 
 ```powershell
-starfinder add "Name" ["Name2" ...]   # fetch from ThePornDB + auto-embed if Python available
-starfinder view "Name"                # show stored profile
-starfinder list                       # list all performers
-starfinder remove "Name"              # remove a performer
-starfinder stats                      # DB size, image cache size
-starfinder clear-cache                # clear downloaded images
+luminary add "Name" ["Name2" ...]   # fetch from ThePornDB + auto-embed if Python available
+luminary view "Name"                # show stored profile
+luminary list                       # list all performers
+luminary remove "Name"              # remove a performer
+luminary stats                      # DB size, image cache size
+luminary clear-cache                # clear downloaded images
 ```
 
 ### Preference tree
 
 ```powershell
-starfinder profile
+luminary profile
 ```
 
 ```
@@ -115,10 +115,10 @@ The tree drills through **body type → ethnicity → hair → age range → eye
 
 ```powershell
 # Based on your full preference tree
-starfinder recommend [--limit 10]
+luminary recommend [--limit 10]
 
 # Performers similar to one specific person (uses ThePornDB /similar API)
-starfinder similar "Seka Black"
+luminary similar "Seka Black"
 ```
 
 `recommend` scores every candidate against your tree. Body type is a **hard exclusion gate** — wrong physique means excluded entirely. Hair and eye colour are small bonuses.
@@ -129,14 +129,14 @@ Mix attributes from stored performers or set them manually:
 
 ```powershell
 # Face attributes from one, body measurements from another
-starfinder find --looks-like "Naughty Alysha" --body-like "Dee Siren"
-starfinder find --looks-like "Naughty Alysha" --body-like "Lisa Ann"
+luminary find --looks-like "Naughty Alysha" --body-like "Dee Siren"
+luminary find --looks-like "Naughty Alysha" --body-like "Lisa Ann"
 
 # Manual filters
-starfinder find --ethnicity Caucasian --hair Blonde --cup DD --age-min 40
+luminary find --ethnicity Caucasian --hair Blonde --cup DD --age-min 40
 
 # Combine
-starfinder find --looks-like "Naughty Alysha" --cup DD --age-min 46 --age-max 60
+luminary find --looks-like "Naughty Alysha" --cup DD --age-min 46 --age-max 60
 ```
 
 **`--looks-like`** copies ethnicity, hair colour, and eye colour.  
@@ -162,19 +162,19 @@ pip install insightface onnxruntime
 
 # Generate ArcFace embeddings for all performers in your DB
 # Downloads buffalo_l model on first run (~300 MB, cached forever after)
-starfinder embed
+luminary embed
 ```
 
-Once embeddings exist, `find --looks-like` automatically re-ranks results by **cosine similarity of 512-dim ArcFace vectors** — actual facial geometry, not just hair/ethnicity attributes. New performers added via `starfinder add` are auto-embedded.
+Once embeddings exist, `find --looks-like` automatically re-ranks results by **cosine similarity of 512-dim ArcFace vectors** — actual facial geometry, not just hair/ethnicity attributes. New performers added via `luminary add` are auto-embedded.
 
 ### Settings
 
 ```powershell
-starfinder config                        # show current settings
-starfinder config gender female          # biological female (default)
-starfinder config gender trans-female
-starfinder config gender male
-starfinder config gender any
+luminary config                        # show current settings
+luminary config gender female          # biological female (default)
+luminary config gender trans-female
+luminary config gender male
+luminary config gender any
 ```
 
 ---
@@ -227,10 +227,10 @@ Embeddings are generated once and cached — subsequent searches are instant.
 
 | What | Where |
 |------|-------|
-| Performer database | `%LOCALAPPDATA%\starfinder\starfinder.db` |
+| Performer database | `%LOCALAPPDATA%\luminary\luminary.db` |
 | Face embeddings | Stored inside the same SQLite DB |
-| Image cache | `%LOCALAPPDATA%\starfinder\images\` |
-| Settings | `%LOCALAPPDATA%\starfinder\config.json` |
+| Image cache | `%LOCALAPPDATA%\luminary\images\` |
+| Settings | `%LOCALAPPDATA%\luminary\config.json` |
 | InsightFace model | `~\.insightface\models\buffalo_l\` |
 
 Nothing leaves your machine except outbound API calls to ThePornDB when you explicitly run a command. Face embeddings are biometric data — keeping them local is intentional.
@@ -239,7 +239,7 @@ Nothing leaves your machine except outbound API calls to ThePornDB when you expl
 
 ## Architecture
 
-Starfinder is a **local-first, single-node** application:
+Luminary is a **local-first, single-node** application:
 
 - **SQLite** — embedded, zero-infrastructure database
 - **ThePornDB REST API** — external data source (performer profiles, similar-performer queries)
