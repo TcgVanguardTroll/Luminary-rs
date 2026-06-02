@@ -1,0 +1,42 @@
+[package]
+name = "starfinder"
+version = "0.1.0"
+edition = "2021"
+authors = ["Jordan Grant <jordangrant46@gmail.com>"]
+description = "A privacy-focused recommendation engine for discovering content you'll love"
+license = "MIT"
+repository = "https://github.com/TcgVanguardTroll/starfinder-rs"
+keywords = ["recommendation", "cli", "discovery", "preferences", "similarity"]
+categories = ["command-line-utilities", "algorithms"]
+
+[[bin]]
+name = "starfinder"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive", "cargo"] }
+colored = "2.1"
+reqwest = { version = "0.11", features = ["blocking", "json", "stream"] }
+scraper = "0.18"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rusqlite = { version = "0.30", features = ["bundled"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1.0"
+thiserror = "1.0"
+viuer = "0.7"
+image = "0.24"
+sha2 = "0.10"
+dirs = "5.0"
+chrono = { version = "0.4", features = ["serde"] }
+urlencoding = "2.1"
+env_logger = "0.11"
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
