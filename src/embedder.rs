@@ -18,14 +18,22 @@ pub fn generate_body_embeddings(image_urls: &[String]) -> Result<Vec<Option<Vec<
 
 /// Runs a Python embedding sidecar that takes image URLs and returns a JSON
 /// array of `{<field>: [floats]}` or `{error: ...}`, one per URL, in order.
-fn run_sidecar(script_name: &str, field: &str, image_urls: &[String]) -> Result<Vec<Option<Vec<f32>>>> {
+fn run_sidecar(
+    script_name: &str,
+    field: &str,
+    image_urls: &[String],
+) -> Result<Vec<Option<Vec<f32>>>> {
     if image_urls.is_empty() {
         return Ok(Vec::new());
     }
     let script = find_script(script_name)?;
     let python = find_python()?;
 
-    log::info!("{}: {} image(s) in one batch", script_name, image_urls.len());
+    log::info!(
+        "{}: {} image(s) in one batch",
+        script_name,
+        image_urls.len()
+    );
 
     let output = Command::new(&python)
         .arg(&script)
@@ -36,7 +44,11 @@ fn run_sidecar(script_name: &str, field: &str, image_urls: &[String]) -> Result<
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.trim().is_empty() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("{} produced no output.\nstderr: {}", script_name, stderr.trim());
+        anyhow::bail!(
+            "{} produced no output.\nstderr: {}",
+            script_name,
+            stderr.trim()
+        );
     }
 
     let arr: Vec<serde_json::Value> = serde_json::from_str(stdout.trim())
@@ -254,10 +266,12 @@ fn find_script(name: &str) -> Result<PathBuf> {
     .flatten()
     .collect();
 
-    candidates
-        .into_iter()
-        .find(|p| p.exists())
-        .ok_or_else(|| anyhow::anyhow!("{} not found. Place it alongside the luminary binary.", name))
+    candidates.into_iter().find(|p| p.exists()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} not found. Place it alongside the luminary binary.",
+            name
+        )
+    })
 }
 
 #[cfg(test)]

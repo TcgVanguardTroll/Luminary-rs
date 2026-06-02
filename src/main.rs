@@ -1723,17 +1723,19 @@ async fn body_search(db: &Database, name: &str, limit: usize, images: bool) -> a
     let reference = db
         .get_performer(name)?
         .ok_or_else(|| anyhow::anyhow!("'{}' not found in your library. Add them first.", name))?;
-    let key = cfg
-        .stashdb_key
-        .clone()
-        .filter(|k| !k.is_empty())
-        .context("body-search needs full-body images from StashDB. Set 'luminary config stashdb-key <key>'.")?;
+    let key = cfg.stashdb_key.clone().filter(|k| !k.is_empty()).context(
+        "body-search needs full-body images from StashDB. Set 'luminary config stashdb-key <key>'.",
+    )?;
     let stash = StashdbClient::new(key);
 
     // Reference body vector: centroid over the reference's StashDB images.
     println!(
         "{}",
-        format!("Building body frame for {} from StashDB images...", reference.name).bright_cyan()
+        format!(
+            "Building body frame for {} from StashDB images...",
+            reference.name
+        )
+        .bright_cyan()
     );
     let ref_imgs = stash.image_urls(&reference.name, 4).await;
     let ref_vecs: Vec<Vec<f32>> = embedder::generate_body_embeddings(&ref_imgs)
@@ -1741,9 +1743,8 @@ async fn body_search(db: &Database, name: &str, limit: usize, images: bool) -> a
         .into_iter()
         .flatten()
         .collect();
-    let ref_body = embedder::body_centroid(&ref_vecs).context(
-        "No pose detected in the reference's images — need a full-body photo.",
-    )?;
+    let ref_body = embedder::body_centroid(&ref_vecs)
+        .context("No pose detected in the reference's images — need a full-body photo.")?;
     println!(
         "{}",
         format!("  frame from {}/{} images", ref_vecs.len(), ref_imgs.len()).bright_black()
@@ -1796,16 +1797,23 @@ async fn body_search(db: &Database, name: &str, limit: usize, images: bool) -> a
     scored.truncate(limit);
 
     if scored.is_empty() {
-        println!("{}", "No candidates with a detectable body pose found.".yellow());
+        println!(
+            "{}",
+            "No candidates with a detectable body pose found.".yellow()
+        );
         return Ok(());
     }
 
     println!();
     println!(
         "{}",
-        format!("Top {} by body frame similarity to {}:", scored.len(), reference.name)
-            .bright_cyan()
-            .bold()
+        format!(
+            "Top {} by body frame similarity to {}:",
+            scored.len(),
+            reference.name
+        )
+        .bright_cyan()
+        .bold()
     );
     println!();
     let img_cache = if images { ImageCache::new().ok() } else { None };
@@ -1839,7 +1847,10 @@ async fn body_search(db: &Database, name: &str, limit: usize, images: bool) -> a
         }
     }
     println!();
-    println!("{}", "Use 'luminary add <name>' to add any to your profile.".bright_black());
+    println!(
+        "{}",
+        "Use 'luminary add <name>' to add any to your profile.".bright_black()
+    );
     Ok(())
 }
 
