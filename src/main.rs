@@ -15,6 +15,7 @@ use colored::*;
 use luminary::database::Database;
 use luminary::image_cache::ImageCache;
 use luminary::models::SearchFilters;
+use luminary::pornpics::PornpicsClient;
 use luminary::scraper::Scraper;
 use luminary::stashdb::StashdbClient;
 use luminary::tpdb::TpdbClient;
@@ -25,6 +26,7 @@ use luminary::{config, embedder, image_cache, models, recommender};
 /// Capped to bound CPU cost (~5s per image on CPU).
 async fn build_centroid_urls(p: &models::Performer, stash: Option<&StashdbClient>) -> Vec<String> {
     let mut urls: Vec<String> = Vec::new();
+    // StashDB multi-image gallery (clean, person-centric) — best for faces.
     if let Some(s) = stash {
         for u in s.image_urls(&p.name, 3).await {
             if !urls.contains(&u) {
@@ -32,12 +34,17 @@ async fn build_centroid_urls(p: &models::Performer, stash: Option<&StashdbClient
             }
         }
     }
+    // TPDB stored profile media: face crop, profile poster, and the extra
+    // `posters[]` shoots (all of *this* performer — safe for the face centroid).
+    // Scene stills are deliberately excluded here: they often contain a co-star,
+    // and "largest face" can grab the wrong person. They return only once we add
+    // identity-gating (match a scene face against the clean profile seed).
     for u in face_image_urls(p) {
         if !urls.contains(&u) {
             urls.push(u);
         }
     }
-    urls.truncate(4);
+    urls.truncate(8);
     urls
 }
 
@@ -252,6 +259,10 @@ enum Commands {
         /// Render a thumbnail image inline for each result
         #[arg(long, default_value_t = false)]
         images: bool,
+        /// Match by silhouette *volume* (waist/hip/thigh fullness) instead of
+        /// skeletal frame — captures butt & thigh shape the pose vector misses.
+        #[arg(long, default_value_t = false)]
+        shape: bool,
     },
     /// Search for performers who look like someone (by face)
     FaceSearch {
@@ -390,8 +401,9 @@ async fn main() -> anyhow::Result<()> {
             name,
             limit,
             images,
+            shape,
         } => {
-            body_search(&db, &name, limit, images).await?;
+            body_search(&db, &name, limit, images, shape).await?;
         }
         Commands::FaceSearch {
             name,
@@ -1854,39 +1866,89 @@ async fn warm(db: &Database, limit: usize) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Search the local face corpus for performers who look like a reference.
-/// Find performers with a similar body frame, using MediaPipe pose vectors
-/// over StashDB's full-body images (TPDB face crops have no body to detect).
-async fn body_search(db: &Database, name: &str, limit: usize, images: bool) -> anyhow::Result<()> {
+/// Find performers with a similar build from full-body images, over a combined
+/// (pornpics + TPDB scenes + StashDB) pool, gated to clean standing frames.
+///
+/// Two modes: the default *frame* uses the skeletal pose vector (shoulder/hip/
+/// leg proportions); `shape` uses the silhouette *volume* vector (waist/hip/
+/// thigh fullness from the body outline) — for butt & thigh shape the skeleton
+/// can't see.
+async fn body_search(
+    db: &Database,
+    name: &str,
+    limit: usize,
+    images: bool,
+    shape: bool,
+) -> anyhow::Result<()> {
     let cfg = config::Config::load();
     let reference = db
         .get_performer(name)?
         .ok_or_else(|| anyhow::anyhow!("'{}' not found in your library. Add them first.", name))?;
+    // Noun used throughout the output for whichever signal we're matching on.
+    let kind = if shape { "shape" } else { "frame" };
     let key = cfg.stashdb_key.clone().filter(|k| !k.is_empty()).context(
         "body-search needs full-body images from StashDB. Set 'luminary config stashdb-key <key>'.",
     )?;
     let stash = StashdbClient::new(key);
 
-    // Reference body vector: centroid over the reference's StashDB images.
+    // Reference body vector: centroid over a combined image pool from every
+    // source we have. The per-image pose gate (visibility + upright) discards
+    // crops and non-standing frames, so volume here is good — more candidates
+    // in means more *clean* full-body frames survive.
     println!(
         "{}",
         format!(
-            "Building body frame for {} from StashDB images...",
-            reference.name
+            "Building body {} for {} from pornpics + TPDB scenes + StashDB...",
+            kind, reference.name
         )
         .bright_cyan()
     );
-    let ref_imgs = stash.image_urls(&reference.name, 4).await;
-    let ref_vecs: Vec<Vec<f32>> = embedder::generate_body_embeddings(&ref_imgs)
+    let tpdb = cfg.resolve_api_key().ok().map(TpdbClient::new);
+    let mut ref_imgs: Vec<String> = Vec::new();
+    // pornpics gallery covers — the richest source of distinct full-body shoots.
+    for u in PornpicsClient::new().image_urls(&reference.name, 20).await {
+        if !ref_imgs.contains(&u) {
+            ref_imgs.push(u);
+        }
+    }
+    if let Some(t) = &tpdb {
+        for u in t.scene_image_urls(&reference.name, 12).await {
+            if !ref_imgs.contains(&u) {
+                ref_imgs.push(u);
+            }
+        }
+    }
+    for u in stash.image_urls(&reference.name, 6).await {
+        if !ref_imgs.contains(&u) {
+            ref_imgs.push(u);
+        }
+    }
+    let embed = |urls: &[String]| {
+        if shape {
+            embedder::generate_seg_embeddings(urls)
+        } else {
+            embedder::generate_body_embeddings(urls)
+        }
+    };
+    let ref_vecs: Vec<Vec<f32>> = embed(&ref_imgs)
         .unwrap_or_default()
         .into_iter()
         .flatten()
         .collect();
-    let ref_body = embedder::body_centroid(&ref_vecs)
-        .context("No pose detected in the reference's images — need a full-body photo.")?;
+    let ref_body = embedder::body_centroid(&ref_vecs).context(
+        "No usable full-body standing photo found for the reference. Their images \
+         are headshots/crops or non-standing poses, which can't yield a reliable \
+         body vector.",
+    )?;
     println!(
         "{}",
-        format!("  frame from {}/{} images", ref_vecs.len(), ref_imgs.len()).bright_black()
+        format!(
+            "  {} from {}/{} images (cropped & non-standing poses rejected)",
+            kind,
+            ref_vecs.len(),
+            ref_imgs.len()
+        )
+        .bright_black()
     );
 
     // Candidate pool from StashDB (same gender), each with their image array.
@@ -1909,7 +1971,7 @@ async fn body_search(db: &Database, name: &str, limit: usize, images: bool) -> a
 
     println!(
         "{}",
-        format!("Pose-embedding {} candidates...", pool.len()).bright_cyan()
+        format!("Embedding {} candidates...", pool.len()).bright_cyan()
     );
 
     // Flatten all candidate images into one batched pose call, tracking ranges.
@@ -1921,7 +1983,7 @@ async fn body_search(db: &Database, name: &str, limit: usize, images: bool) -> a
         flat.extend(imgs);
         ranges.push((start, flat.len()));
     }
-    let all = embedder::generate_body_embeddings(&flat).unwrap_or_default();
+    let all = embed(&flat).unwrap_or_default();
 
     let mut scored: Vec<(f64, models::Performer)> = pool
         .into_iter()
@@ -1929,7 +1991,12 @@ async fn body_search(db: &Database, name: &str, limit: usize, images: bool) -> a
         .filter_map(|(p, (s, e))| {
             let vecs: Vec<Vec<f32>> = all.get(s..e)?.iter().flatten().cloned().collect();
             let cv = embedder::body_centroid(&vecs)?;
-            Some((embedder::body_similarity_pct(&ref_body, &cv), p))
+            let pct = if shape {
+                embedder::seg_similarity_pct(&ref_body, &cv)
+            } else {
+                embedder::body_similarity_pct(&ref_body, &cv)
+            };
+            Some((pct, p))
         })
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -1947,8 +2014,9 @@ async fn body_search(db: &Database, name: &str, limit: usize, images: bool) -> a
     println!(
         "{}",
         format!(
-            "Top {} by body frame similarity to {}:",
+            "Top {} by body {} similarity to {}:",
             scored.len(),
+            kind,
             reference.name
         )
         .bright_cyan()
@@ -1974,7 +2042,7 @@ async fn body_search(db: &Database, name: &str, limit: usize, images: bool) -> a
                 ht,
             )
             .bright_black(),
-            format!("frame {:.0}%", pct).bright_cyan(),
+            format!("{} {:.0}%", kind, pct).bright_cyan(),
         );
         if let Some(url) = &p.source_url {
             println!("   {} {}", "↳".bright_black(), url.blue().underline());

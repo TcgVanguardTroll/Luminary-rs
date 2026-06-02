@@ -7,13 +7,21 @@ use std::process::Command;
 /// than calling `generate_embedding` per image. Returns one slot per input URL,
 /// in order: `Some(vec)` on success, `None` if no face was detected/decoded.
 pub fn generate_embeddings(image_urls: &[String]) -> Result<Vec<Option<Vec<f32>>>> {
-    run_sidecar("face_embed.py", "embedding", image_urls)
+    run_sidecar("face_embed.py", "embedding", &[], image_urls)
 }
 
 /// Generates body-shape (pose) vectors for many image URLs via body_embed.py,
 /// in one batched call. `Some(vec)` per URL where a pose was detected, else None.
 pub fn generate_body_embeddings(image_urls: &[String]) -> Result<Vec<Option<Vec<f32>>>> {
-    run_sidecar("body_embed.py", "body", image_urls)
+    run_sidecar("body_embed.py", "body", &[], image_urls)
+}
+
+/// Generates silhouette *volume* vectors (waist/hip/thigh widths from the body
+/// outline) via body_embed.py `--seg`. Captures glute & thigh fullness that the
+/// skeletal pose vector and measurements both miss. `Some(vec)` per URL with a
+/// clean full-body standing silhouette, else None.
+pub fn generate_seg_embeddings(image_urls: &[String]) -> Result<Vec<Option<Vec<f32>>>> {
+    run_sidecar("body_embed.py", "seg", &["--seg"], image_urls)
 }
 
 /// Runs a Python embedding sidecar that takes image URLs and returns a JSON
@@ -21,6 +29,7 @@ pub fn generate_body_embeddings(image_urls: &[String]) -> Result<Vec<Option<Vec<
 fn run_sidecar(
     script_name: &str,
     field: &str,
+    extra_args: &[&str],
     image_urls: &[String],
 ) -> Result<Vec<Option<Vec<f32>>>> {
     if image_urls.is_empty() {
@@ -37,6 +46,7 @@ fn run_sidecar(
 
     let output = Command::new(&python)
         .arg(&script)
+        .args(extra_args)
         .args(image_urls)
         .output()
         .with_context(|| format!("Failed to run {} {}", python, script.display()))?;
@@ -106,6 +116,25 @@ pub fn body_similarity_pct(a: &[f32], b: &[f32]) -> f64 {
         .sqrt();
     // Empirically, distances run ~0 (identical) to ~1.2 (very different builds).
     let sim = 1.0 - (d as f64 / 1.2).clamp(0.0, 1.0);
+    (sim * 100.0).round()
+}
+
+/// Silhouette *volume* similarity as a 0–100%. Same weighted-Euclidean→percent
+/// idea as `body_similarity_pct`, but calibrated for the seg vector, whose
+/// components (width ratios ~1.0–1.6) spread wider than the pose ratios — so the
+/// "very different" distance is larger. Divisor is a rough calibration; ranking
+/// order (what we use) is robust to its exact value.
+pub fn seg_similarity_pct(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let d: f32 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(x, y)| (x - y).powi(2))
+        .sum::<f32>()
+        .sqrt();
+    let sim = 1.0 - (d as f64 / 2.0).clamp(0.0, 1.0);
     (sim * 100.0).round()
 }
 
@@ -305,6 +334,16 @@ mod tests {
     fn mismatched_or_empty_vectors_are_zero() {
         assert_eq!(cosine_similarity(&[1.0, 2.0], &[1.0]), 0.0);
         assert_eq!(cosine_similarity(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn seg_similarity_orders_by_shape_distance() {
+        let a = vec![1.0, 1.5, 1.4, 1.4, 1.0]; // curvy reference
+        let near = vec![1.05, 1.45, 1.45, 1.35, 0.95]; // similar build
+        let far = vec![0.9, 1.0, 0.9, 1.1, 0.9]; // straighter, slimmer
+        assert_eq!(seg_similarity_pct(&a, &a), 100.0);
+        assert!(seg_similarity_pct(&a, &near) > seg_similarity_pct(&a, &far));
+        assert_eq!(seg_similarity_pct(&[1.0, 2.0], &[1.0]), 0.0);
     }
 
     #[test]

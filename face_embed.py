@@ -21,6 +21,10 @@ import glob
 import tempfile
 import urllib.request
 
+# Minimum detector confidence to trust a face. Below this we treat it as no
+# usable face rather than embedding a blurry/false detection into a centroid.
+MIN_DET_SCORE = 0.5
+
 
 def _register_cuda_dlls():
     """Add the pip-installed NVIDIA CUDA/cuDNN bin dirs to the DLL search path
@@ -91,7 +95,12 @@ def main():
             faces = app.get(img)
             if faces:
                 face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
-                results.append({"embedding": face.embedding.tolist()})
+                # Drop low-confidence detections (blurry background faces, false
+                # positives) so they can't poison the centroid.
+                if getattr(face, "det_score", 1.0) < MIN_DET_SCORE:
+                    results.append({"error": "Low-confidence face"})
+                else:
+                    results.append({"embedding": face.embedding.tolist()})
             else:
                 results.append({"error": "No face detected"})
         except Exception as e:

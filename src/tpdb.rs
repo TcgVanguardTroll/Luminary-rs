@@ -46,6 +46,37 @@ struct TpdbPerformer {
     face: Option<String>,
     #[serde(default)]
     images: Vec<String>,
+    #[serde(default)]
+    posters: Vec<TpdbPoster>,
+}
+
+/// One entry of a performer's `posters[]` array. TPDB returns several profile
+/// posters per performer (different shoots/sites), not just the single `image`.
+#[derive(Debug, Deserialize, Serialize, Default)]
+struct TpdbPoster {
+    #[serde(default)]
+    url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TpdbSceneResponse {
+    data: Vec<TpdbScene>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TpdbScene {
+    /// `background` is usually `{ full, large, ... }`, but some scenes return
+    /// `[]` or null — keep it as a Value and extract `full` defensively.
+    #[serde(default)]
+    background: serde_json::Value,
+    #[serde(default)]
+    performers: Vec<TpdbScenePerformer>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TpdbScenePerformer {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Default)]
@@ -150,6 +181,73 @@ impl TpdbClient {
         }
     }
 
+    /// Collects clean full-body scene background images for a performer.
+    ///
+    /// Scene backgrounds are action stills (whole body in frame) hosted on the
+    /// TPDB CDN — far better for pose/body matching than the cropped profile
+    /// poster, and there are many per performer. This rescues niche performers
+    /// who have only one or two profile photos. Best-effort: returns an empty
+    /// vec on any error so callers can fall back to other sources.
+    pub async fn scene_image_urls(&self, name: &str, max: usize) -> Vec<String> {
+        match self.try_scene_image_urls(name, max).await {
+            Ok(urls) => urls,
+            Err(e) => {
+                log::warn!("TPDB scene lookup failed for {}: {}", name, e);
+                Vec::new()
+            }
+        }
+    }
+
+    async fn try_scene_image_urls(&self, name: &str, max: usize) -> Result<Vec<String>> {
+        // `q` is a fuzzy text search, so it returns scenes that merely mention
+        // the name. We keep only scenes that actually list this performer.
+        let url = format!(
+            "{}/scenes?q={}&per_page=30",
+            TPDB_API_BASE,
+            urlencoding::encode(name)
+        );
+        log::info!("TPDB scenes: {}", url);
+
+        let resp = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await
+            .context("Failed to query TPDB scenes")?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("TPDB scenes returned {}", resp.status());
+        }
+
+        let parsed: TpdbSceneResponse = resp.json().await.context("parse TPDB scenes")?;
+        let target = name.trim().to_lowercase();
+
+        let mut urls: Vec<String> = Vec::new();
+        for scene in parsed.data {
+            let features = scene.performers.iter().any(|p| {
+                p.name
+                    .as_deref()
+                    .is_some_and(|n| n.trim().to_lowercase() == target)
+            });
+            if !features {
+                continue;
+            }
+            // Prefer the clean CDN background; skip watermarked posters and
+            // external studio-hosted images. `.get` tolerates [] / null shapes.
+            if let Some(full) = scene.background.get("full").and_then(|v| v.as_str()) {
+                let full = full.to_string();
+                if !urls.contains(&full) {
+                    urls.push(full);
+                    if urls.len() >= max {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(urls)
+    }
+
     /// Get detailed performer information by ID
     pub async fn get_performer(&self, id: &str) -> Result<Option<Performer>> {
         let url = format!("{}/performers/{}", TPDB_API_BASE, id);
@@ -201,8 +299,18 @@ impl TpdbClient {
         performer.birthdate = tpdb.extras.birthday;
 
         performer.face_url = tpdb.face;
-        performer.profile_image_url = tpdb.image.or_else(|| tpdb.images.first().cloned());
-        performer.gallery_urls = tpdb.images;
+        // Merge the multi-image `posters[]` array into the gallery — TPDB returns
+        // several profile posters, but we previously kept only the single `image`.
+        let mut gallery = tpdb.images;
+        for poster in tpdb.posters {
+            if let Some(u) = poster.url {
+                if !gallery.contains(&u) {
+                    gallery.push(u);
+                }
+            }
+        }
+        performer.profile_image_url = tpdb.image.or_else(|| gallery.first().cloned());
+        performer.gallery_urls = gallery;
 
         performer.gender = tpdb.gender.or(tpdb.extras.gender);
         performer.tpdb_id = Some(tpdb.numeric_id);
