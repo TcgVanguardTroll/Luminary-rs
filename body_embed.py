@@ -96,6 +96,19 @@ def is_upright(lm):
     return sh_y < hip_y < knee_y < ank_y
 
 
+def classify_view(lm):
+    """Pose-determinable view: 'side' (profile — the shoulders collapse in x) vs
+    'frontal' (facing the camera-axis, front *or* rear).
+
+    Front-vs-rear is deliberately NOT decided here: MediaPipe reports face-landmark
+    visibility as high even when the face is turned away, so pose can't tell them
+    apart. The ingest splits 'frontal' into front/rear using its face pass — a
+    detected face means front, its absence (on a full body) means rear.
+    """
+    sw = abs(lm[11].x - lm[12].x)  # shoulder breadth (normalised)
+    return "side" if sw < 0.08 else "frontal"
+
+
 def build_vector(lm):
     """Scale-invariant body-proportion ratios from 33 pose landmarks.
     Returns None for cropped or non-standing poses so they don't skew a centroid."""
@@ -264,14 +277,14 @@ def main():
                     if seg_res.confidence_masks
                     else None
                 )
-                entry = {}
+                entry = {"view": classify_view(lm)}
                 pose_vec = build_vector(lm)
                 if pose_vec:
                     entry["body"] = pose_vec
                 seg_vec = build_seg_vector(lm, mask)
                 if seg_vec:
                     entry["seg"] = seg_vec
-                results.append(entry if entry else {"error": reject})
+                results.append(entry)
             else:
                 vec = build_vector(lm)
                 results.append({field: vec} if vec else {"error": reject})
