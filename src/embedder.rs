@@ -45,6 +45,51 @@ pub fn generate_embedding(image_url: &str) -> Result<Vec<f32>> {
     Ok(embedding)
 }
 
+/// L2-normalises a vector in place (unit length).
+fn normalize(v: &mut [f32]) {
+    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for x in v.iter_mut() {
+            *x /= norm;
+        }
+    }
+}
+
+/// Generates a centroid embedding by averaging the face embeddings of several
+/// images of the same person. Each embedding is L2-normalised before averaging
+/// so no single photo dominates. More angles/lighting ⇒ a more robust face
+/// signature. Returns None if no image yielded a detectable face.
+pub fn generate_centroid_embedding(image_urls: &[String]) -> Option<Vec<f32>> {
+    let mut sum: Vec<f32> = Vec::new();
+    let mut count = 0usize;
+
+    for url in image_urls {
+        if let Ok(mut emb) = generate_embedding(url) {
+            normalize(&mut emb);
+            if sum.is_empty() {
+                sum = emb;
+            } else if sum.len() == emb.len() {
+                for (s, e) in sum.iter_mut().zip(emb.iter()) {
+                    *s += *e;
+                }
+            } else {
+                continue; // dimension mismatch, skip
+            }
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        return None;
+    }
+    for x in sum.iter_mut() {
+        *x /= count as f32;
+    }
+    normalize(&mut sum);
+    log::info!("Centroid embedding from {} image(s)", count);
+    Some(sum)
+}
+
 /// Cosine similarity between two embedding vectors (range −1..1, higher = more similar).
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {

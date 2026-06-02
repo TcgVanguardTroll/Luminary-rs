@@ -14,6 +14,28 @@ use luminary::scraper::Scraper;
 use luminary::tpdb::TpdbClient;
 use luminary::{config, embedder, image_cache, models, recommender};
 
+/// Collects up to a few distinct image URLs for a performer, best face first,
+/// for building a robust centroid face embedding.
+fn face_image_urls(p: &models::Performer) -> Vec<String> {
+    let mut urls: Vec<String> = Vec::new();
+    let mut push = |u: &str| {
+        let s = u.to_string();
+        if !u.is_empty() && !urls.contains(&s) {
+            urls.push(s);
+        }
+    };
+    if let Some(u) = &p.face_url {
+        push(u);
+    }
+    if let Some(u) = &p.profile_image_url {
+        push(u);
+    }
+    for u in p.gallery_urls.iter().take(2) {
+        push(u);
+    }
+    urls
+}
+
 /// Downloads (cached) and renders a small inline thumbnail for a performer.
 /// Best-effort: silently does nothing if the terminal can't display images.
 async fn render_thumbnail(cache: &ImageCache, url: &str) {
@@ -160,6 +182,23 @@ enum Commands {
     },
     /// Generate face embeddings for all performers missing one
     Embed,
+    /// Pre-fetch and embed a pool of candidates into the local face corpus,
+    /// so later face searches are instant (no API calls or re-embedding).
+    Warm {
+        /// How many candidates to embed into the corpus
+        #[arg(long, default_value_t = 40)]
+        limit: usize,
+    },
+    /// Search your local face corpus for performers who look like someone
+    FaceSearch {
+        /// A performer in your library to match faces against
+        name: String,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Render a thumbnail image inline for each result
+        #[arg(long, default_value_t = false)]
+        images: bool,
+    },
     /// View or change settings
     Config {
         /// Setting to change (e.g. gender)
@@ -266,6 +305,16 @@ async fn main() -> anyhow::Result<()> {
         Commands::Embed => {
             embed_all(&db)?;
         }
+        Commands::Warm { limit } => {
+            warm(&db, limit).await?;
+        }
+        Commands::FaceSearch {
+            name,
+            limit,
+            images,
+        } => {
+            face_search(&db, &name, limit, images).await?;
+        }
         Commands::Config { key, value } => {
             configure(key, value)?;
         }
@@ -289,7 +338,7 @@ async fn add_performers(db: &Database, names: Vec<String>) -> anyhow::Result<()>
     );
     println!();
 
-    let api_key = std::env::var("TPDB_API_KEY").ok();
+    let api_key = config::Config::load().resolve_api_key().ok();
     let tpdb_client = api_key.as_ref().map(|key| TpdbClient::new(key.clone()));
     let scraper = Scraper::new();
 
@@ -298,11 +347,11 @@ async fn add_performers(db: &Database, names: Vec<String>) -> anyhow::Result<()>
     } else {
         println!(
             "{}",
-            "No TPDB_API_KEY found, using web scraping (may fail)".yellow()
+            "No API key found, using web scraping (may fail)".yellow()
         );
         println!(
             "{}",
-            "   Set TPDB_API_KEY environment variable for better results".bright_black()
+            "   Set one with 'luminary config api-key <key>' for better results".bright_black()
         );
     }
     println!();
@@ -366,19 +415,21 @@ async fn add_performers(db: &Database, names: Vec<String>) -> anyhow::Result<()>
                             "     {}",
                             format!("({}, {})", performer.body_type, source).bright_black()
                         );
-                        // Try to generate face embedding silently
-                        let face_url = performer
-                            .face_url
-                            .as_deref()
-                            .or(performer.profile_image_url.as_deref());
-                        if let Some(url) = face_url {
-                            match embedder::generate_embedding(url) {
-                                Ok(emb) => {
+                        // Build a robust centroid embedding from several images
+                        let urls = face_image_urls(&performer);
+                        if !urls.is_empty() {
+                            match embedder::generate_centroid_embedding(&urls) {
+                                Some(emb) => {
                                     let _ = db.save_embedding(&performer.name, &emb);
-                                    println!("     {} face embedding stored", "↳".bright_black());
+                                    println!(
+                                        "     {} face embedding stored ({} image{})",
+                                        "↳".bright_black(),
+                                        urls.len(),
+                                        if urls.len() == 1 { "" } else { "s" }
+                                    );
                                 }
-                                Err(e) => {
-                                    log::debug!("Embedding skipped for {}: {}", name, e);
+                                None => {
+                                    log::debug!("No face detected for {}", name);
                                 }
                             }
                         }
@@ -649,9 +700,8 @@ async fn recommend(db: &Database, limit: usize, images: bool) -> anyhow::Result<
         return Ok(());
     }
 
-    let api_key = std::env::var("TPDB_API_KEY")
-        .context("TPDB_API_KEY not set — needed for recommendations")?;
     let cfg = config::Config::load();
+    let api_key = cfg.resolve_api_key()?;
 
     let known_names: std::collections::HashSet<String> =
         performers.iter().map(|p| p.name.to_lowercase()).collect();
@@ -800,8 +850,8 @@ async fn find(
     age_max: Option<u32>,
     limit: usize,
 ) -> anyhow::Result<()> {
-    let api_key = std::env::var("TPDB_API_KEY").context("TPDB_API_KEY not set")?;
     let cfg = config::Config::load();
+    let api_key = cfg.resolve_api_key()?;
 
     // ── Pull attributes from named performers ─────────────────────────────
     let mut ethnicity = eth_arg;
@@ -1006,7 +1056,7 @@ async fn find(
         .into_iter()
         .map(|p| {
             let face = ref_embedding.as_ref().and_then(|ref_emb| {
-                let emb = db.get_embedding(&p.name).ok().flatten().or_else(|| {
+                let emb = db.get_embedding_any(&p.name).ok().flatten().or_else(|| {
                     if embeds_done >= MAX_ONTHEFLY_EMBEDS {
                         return None;
                     }
@@ -1015,8 +1065,9 @@ async fn find(
                         .as_deref()
                         .or(p.profile_image_url.as_deref())
                         .and_then(|url| {
+                            // Persist to the local face corpus so it's free next time.
                             embedder::generate_embedding(url).ok().inspect(|e| {
-                                let _ = db.save_embedding(&p.name, e);
+                                let _ = db.save_candidate(&p, e);
                             })
                         })
                 });
@@ -1178,8 +1229,8 @@ async fn similar(db: &Database, name: &str, limit: usize, images: bool) -> anyho
         .ok_or_else(|| anyhow::anyhow!("No TPDB ID stored for '{}'", name))?
         .to_string();
 
-    let api_key = std::env::var("TPDB_API_KEY").context("TPDB_API_KEY not set")?;
     let cfg = config::Config::load();
+    let api_key = cfg.resolve_api_key()?;
     let client = TpdbClient::new(api_key);
 
     println!(
@@ -1395,8 +1446,8 @@ fn embed_all(db: &Database) -> anyhow::Result<()> {
     let mut skipped = 0;
 
     for p in &pending {
-        let face_url = p.face_url.as_deref().or(p.profile_image_url.as_deref());
-        let Some(url) = face_url else {
+        let urls = face_image_urls(p);
+        if urls.is_empty() {
             println!(
                 "  {} {} — no image URL",
                 "–".bright_black(),
@@ -1404,19 +1455,19 @@ fn embed_all(db: &Database) -> anyhow::Result<()> {
             );
             skipped += 1;
             continue;
-        };
+        }
 
         print!("  {} {}... ", "→".bright_black(), p.name.bright_white());
         std::io::Write::flush(&mut std::io::stdout()).ok();
 
-        match embedder::generate_embedding(url) {
-            Ok(emb) => {
+        match embedder::generate_centroid_embedding(&urls) {
+            Some(emb) => {
                 db.save_embedding(&p.name, &emb)?;
-                println!("{}", "done".green());
+                println!("{} ({} img)", "done".green(), urls.len());
                 ok += 1;
             }
-            Err(e) => {
-                println!("{} {}", "failed:".red(), e.to_string().bright_black());
+            None => {
+                println!("{}", "no face detected".red());
                 skipped += 1;
             }
         }
@@ -1426,6 +1477,161 @@ fn embed_all(db: &Database) -> anyhow::Result<()> {
     println!(
         "{}",
         format!("Done: {} embedded, {} skipped", ok, skipped).green()
+    );
+    Ok(())
+}
+
+/// Pre-fetch a candidate pool and embed faces into the local corpus.
+async fn warm(db: &Database, limit: usize) -> anyhow::Result<()> {
+    let cfg = config::Config::load();
+    let api_key = cfg.resolve_api_key()?;
+    let performers = db.get_all_performers()?;
+    if performers.is_empty() {
+        println!(
+            "{}",
+            "Add some performers first with 'luminary add'.".yellow()
+        );
+        return Ok(());
+    }
+
+    let tree = recommender::build_preference_tree(&performers);
+    let path = recommender::dominant_query_path(&tree);
+    let liked_ids: Vec<i64> = performers.iter().filter_map(|p| p.tpdb_id).collect();
+    let top_ethnicity = path.get(1).map(|s| s.as_str());
+    let known: std::collections::HashSet<String> =
+        performers.iter().map(|p| p.name.to_lowercase()).collect();
+
+    println!(
+        "{}",
+        format!("Warming face corpus (up to {} candidates)...", limit)
+            .bright_cyan()
+            .bold()
+    );
+    println!(
+        "{}",
+        "  This embeds faces now so searches are instant later.".bright_black()
+    );
+    println!();
+
+    let client = TpdbClient::new(api_key);
+    let pool = client
+        .get_recommendations(&liked_ids, top_ethnicity, None, &cfg.gender_filter)
+        .await?;
+
+    let mut done = 0usize;
+    for p in pool {
+        if done >= limit {
+            break;
+        }
+        if known.contains(&p.name.to_lowercase()) {
+            continue;
+        }
+        if let Some(url) = p.face_url.as_deref().or(p.profile_image_url.as_deref()) {
+            if let Ok(emb) = embedder::generate_embedding(url) {
+                db.save_candidate(&p, &emb)?;
+                done += 1;
+                print!("{}", "·".bright_green());
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+            }
+        }
+    }
+
+    println!();
+    println!(
+        "{}",
+        format!(
+            "Embedded {} new faces. Corpus now holds {} total.",
+            done,
+            db.candidate_count()?
+        )
+        .green()
+    );
+    println!(
+        "{}",
+        "  Run 'luminary face-search <name>' to search it.".bright_black()
+    );
+    Ok(())
+}
+
+/// Search the local face corpus for performers who look like a reference.
+async fn face_search(db: &Database, name: &str, limit: usize, images: bool) -> anyhow::Result<()> {
+    let cfg = config::Config::load();
+    let reference = db
+        .get_performer(name)?
+        .ok_or_else(|| anyhow::anyhow!("'{}' not found in your library. Add them first.", name))?;
+    let ref_emb = db.get_embedding(&reference.name)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "No face embedding for '{}'. Run 'luminary embed' first.",
+            reference.name
+        )
+    })?;
+
+    let corpus = db.load_candidates()?;
+    if corpus.is_empty() {
+        println!(
+            "{}",
+            "Face corpus is empty. Run 'luminary warm' to populate it.".yellow()
+        );
+        return Ok(());
+    }
+
+    let mut scored: Vec<(f32, models::Performer)> = corpus
+        .into_iter()
+        .filter(|(_, p)| cfg.gender_filter.matches(p.gender.as_deref()))
+        .filter(|(_, p)| p.name.to_lowercase() != reference.name.to_lowercase())
+        .map(|(e, p)| (embedder::cosine_similarity(&ref_emb, &e), p))
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(limit);
+
+    println!(
+        "{}",
+        format!(
+            "Faces most like {} (from a corpus of {} candidates):",
+            reference.name,
+            scored.len()
+        )
+        .bright_cyan()
+        .bold()
+    );
+    println!();
+
+    let img_cache = if images { ImageCache::new().ok() } else { None };
+    for (i, (sim, p)) in scored.iter().enumerate() {
+        let age_str = p
+            .age
+            .map(|a| format!(", {}", recommender::age_bucket(a)))
+            .unwrap_or_default();
+        println!(
+            "{}. {} {}  {}",
+            (i + 1).to_string().bright_black(),
+            p.name.bright_white().bold(),
+            format!(
+                "({}, {}{}{})",
+                p.body_type,
+                p.ethnicity.as_deref().unwrap_or("?"),
+                p.hair_color
+                    .as_ref()
+                    .map(|h| format!(", {}", h))
+                    .unwrap_or_default(),
+                age_str,
+            )
+            .bright_black(),
+            format!("face {:.0}%", embedder::similarity_pct(*sim)).bright_cyan(),
+        );
+        if let Some(url) = &p.source_url {
+            println!("   {} {}", "↳".bright_black(), url.blue().underline());
+        }
+        if let Some(cache) = &img_cache {
+            if let Some(url) = p.face_url.as_deref().or(p.profile_image_url.as_deref()) {
+                render_thumbnail(cache, url).await;
+            }
+        }
+    }
+    println!();
+    println!(
+        "{}",
+        "Use 'luminary add <name>' to add any to your profile.".bright_black()
     );
     Ok(())
 }
@@ -1441,14 +1647,35 @@ fn configure(key: Option<String>, value: Option<String>) -> anyhow::Result<()> {
             println!("{}", "═".repeat(35).bright_black());
             println!(
                 "  {} {}",
-                "gender:".bright_black(),
+                "gender: ".bright_black(),
                 cfg.gender_filter.display().bright_white()
+            );
+            let key_status = if std::env::var("TPDB_API_KEY").is_ok() {
+                "set (via TPDB_API_KEY env var)".to_string()
+            } else if cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
+                "set (stored in config)".to_string()
+            } else {
+                "not set".to_string()
+            };
+            println!(
+                "  {} {}",
+                "api-key:".bright_black(),
+                key_status.bright_white()
             );
             println!();
             println!(
                 "{}",
-                "  Valid values: female, male, trans-female, trans-male, any".bright_black()
+                "  gender: female, male, trans-female, trans-male, any".bright_black()
             );
+            println!(
+                "{}",
+                "  api-key <key>: store your ThePornDB API key".bright_black()
+            );
+        }
+        (Some("api-key"), Some(val)) => {
+            cfg.api_key = Some(val.to_string());
+            cfg.save()?;
+            println!("{} api-key stored", "Updated:".green());
         }
         (Some("gender"), Some(val)) => match config::GenderFilter::from_str(val) {
             Some(filter) => {
@@ -1470,7 +1697,7 @@ fn configure(key: Option<String>, value: Option<String>) -> anyhow::Result<()> {
         },
         (Some(k), _) => {
             println!(
-                "{} Unknown setting '{}'. Available: gender",
+                "{} Unknown setting '{}'. Available: gender, api-key",
                 "Error:".red(),
                 k
             );

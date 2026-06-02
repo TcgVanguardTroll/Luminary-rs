@@ -31,6 +31,18 @@ impl Database {
             [],
         )?;
 
+        // Local face corpus: every candidate we've ever embedded, searchable by
+        // face. Grows as you run searches / `warm`, enabling whole-library
+        // face-similarity lookups without re-hitting the API or re-embedding.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS candidates (
+                name       TEXT PRIMARY KEY,
+                data       TEXT NOT NULL,
+                embedding  TEXT NOT NULL
+            )",
+            [],
+        )?;
+
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS performers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -106,6 +118,66 @@ impl Database {
         )?;
 
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Upserts a candidate (with its face embedding) into the local corpus.
+    pub fn save_candidate(&self, p: &crate::models::Performer, embedding: &[f32]) -> Result<()> {
+        let data = serde_json::to_string(p)?;
+        let emb = serde_json::to_string(embedding)?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO candidates (name, data, embedding) VALUES (?1, ?2, ?3)",
+            rusqlite::params![p.name, data, emb],
+        )?;
+        Ok(())
+    }
+
+    /// Looks up a cached embedding in either the performers table or the
+    /// candidates corpus (performers first).
+    pub fn get_embedding_any(&self, name: &str) -> Result<Option<Vec<f32>>> {
+        if let Some(e) = self.get_embedding(name)? {
+            return Ok(Some(e));
+        }
+        let mut stmt = self
+            .conn
+            .prepare("SELECT embedding FROM candidates WHERE name = ?1")?;
+        let mut rows = stmt.query(rusqlite::params![name])?;
+        if let Some(row) = rows.next()? {
+            let s: String = row.get(0)?;
+            return Ok(serde_json::from_str(&s).ok());
+        }
+        Ok(None)
+    }
+
+    /// Number of candidates in the local face corpus.
+    pub fn candidate_count(&self) -> Result<usize> {
+        Ok(self
+            .conn
+            .query_row("SELECT COUNT(*) FROM candidates", [], |r| r.get(0))?)
+    }
+
+    /// Loads the whole face corpus as (embedding, performer) pairs.
+    pub fn load_candidates(&self) -> Result<Vec<(Vec<f32>, crate::models::Performer)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT data, embedding FROM candidates")?;
+        let rows = stmt
+            .query_map([], |row| {
+                let data: String = row.get(0)?;
+                let emb: String = row.get(1)?;
+                Ok((data, emb))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for (data, emb) in rows {
+            if let (Ok(p), Ok(e)) = (
+                serde_json::from_str::<crate::models::Performer>(&data),
+                serde_json::from_str::<Vec<f32>>(&emb),
+            ) {
+                out.push((e, p));
+            }
+        }
+        Ok(out)
     }
 
     /// Saves a name alias pointing to a canonical performer name

@@ -70,17 +70,30 @@ impl GenderFilter {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub gender_filter: GenderFilter,
+    /// ThePornDB API key. The TPDB_API_KEY env var takes precedence when set.
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             gender_filter: GenderFilter::Female,
+            api_key: None,
         }
     }
 }
 
 impl Config {
+    /// Resolves the API key: TPDB_API_KEY env var first, then the stored config.
+    pub fn resolve_api_key(&self) -> anyhow::Result<String> {
+        std::env::var("TPDB_API_KEY")
+            .ok()
+            .or_else(|| self.api_key.clone())
+            .filter(|k| !k.is_empty())
+            .context("No API key. Set one with 'luminary config api-key <key>' or the TPDB_API_KEY env var.")
+    }
+
     pub fn load() -> Self {
         Self::path()
             .and_then(|p| {
