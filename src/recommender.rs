@@ -113,6 +113,37 @@ pub fn print_tree(nodes: &[PreferenceNode], prefix: &str, total: usize) {
     }
 }
 
+/// Renders the preference tree as a Mermaid flowchart (paste into any Mermaid
+/// renderer / Markdown that supports it for a visual diagram).
+pub fn to_mermaid(nodes: &[PreferenceNode], total: usize) -> String {
+    let mut out = String::from("```mermaid\nflowchart TD\n");
+    out.push_str(&format!("  root[\"You · {} liked\"]\n", total));
+    let mut counter = 0usize;
+    for n in nodes {
+        emit_mermaid(n, "root", &mut counter, &mut out);
+    }
+    out.push_str("```\n");
+    out
+}
+
+fn emit_mermaid(node: &PreferenceNode, parent: &str, counter: &mut usize, out: &mut String) {
+    let id = format!("n{}", *counter);
+    *counter += 1;
+    // Labels are quoted, so spaces / '?' are fine; strip any stray quotes.
+    let label = format!(
+        "{} · {}/{} · {:.0}%",
+        node.label.replace('"', ""),
+        node.count,
+        node.parent_count,
+        node.pct()
+    );
+    out.push_str(&format!("  {}[\"{}\"]\n", id, label));
+    out.push_str(&format!("  {} --> {}\n", parent, id));
+    for c in &node.children {
+        emit_mermaid(c, &id, counter, out);
+    }
+}
+
 pub fn dominant_query_path(nodes: &[PreferenceNode]) -> Vec<String> {
     let mut path = vec![];
     let mut current = nodes;

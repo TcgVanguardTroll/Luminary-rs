@@ -131,7 +131,11 @@ enum Commands {
         file: String,
     },
     /// Show your taste profile based on liked performers
-    Profile,
+    Profile {
+        /// Output the tree as a Mermaid diagram instead of ASCII
+        #[arg(long, default_value_t = false)]
+        mermaid: bool,
+    },
     /// Get performer recommendations based on your profile
     Recommend {
         #[arg(long, default_value_t = 10)]
@@ -314,8 +318,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Import { file } => {
             import_from_json(&db, &file)?;
         }
-        Commands::Profile => {
-            show_profile(&db)?;
+        Commands::Profile { mermaid } => {
+            show_profile(&db, mermaid)?;
         }
         Commands::Recommend { limit, images } => {
             recommend(&db, limit, images).await?;
@@ -715,7 +719,7 @@ fn clear_cache() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn show_profile(db: &Database) -> anyhow::Result<()> {
+fn show_profile(db: &Database, mermaid: bool) -> anyhow::Result<()> {
     let performers = db.get_all_performers()?;
 
     if performers.is_empty() {
@@ -729,6 +733,12 @@ fn show_profile(db: &Database) -> anyhow::Result<()> {
     let total = performers.len();
     let tree = recommender::build_preference_tree(&performers);
     let path = recommender::dominant_query_path(&tree);
+
+    // Mermaid export: just print the diagram source (paste into any renderer).
+    if mermaid {
+        print!("{}", recommender::to_mermaid(&tree, total));
+        return Ok(());
+    }
 
     println!("{}", "Your Taste Profile".bright_cyan().bold());
     println!("{}", "═".repeat(42).bright_black());
