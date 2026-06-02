@@ -1177,13 +1177,17 @@ async fn find(
                     let whr_str = recommender::performer_whr(p)
                         .map(|r| format!(" whr {:.2}", r))
                         .unwrap_or_default();
+                    let ht_str = recommender::performer_height_cm(p)
+                        .map(|h| format!(" {:.0}cm", h))
+                        .unwrap_or_default();
                     format!(
-                        ", {}w {}h{}",
+                        ", {}w {}h{}{}",
                         parts[1].trim(),
                         parts[2]
                             .trim()
                             .trim_end_matches(|c: char| !c.is_ascii_digit()),
-                        whr_str
+                        whr_str,
+                        ht_str
                     )
                 } else {
                     String::new()

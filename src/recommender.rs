@@ -307,6 +307,51 @@ fn age_f64(p: &Performer) -> f64 {
         .unwrap_or(0.5)
 }
 
+/// Parses height to centimetres, e.g. "154cm" -> 154.0.
+pub fn performer_height_cm(p: &Performer) -> Option<f64> {
+    let s = p.height.as_deref()?;
+    let digits: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let n: f64 = digits.parse().ok()?;
+    if n > 90.0 && n < 230.0 {
+        Some(n)
+    } else {
+        None
+    }
+}
+
+/// Parses weight to kilograms, e.g. "59kg" -> 59.0, "130 lbs" -> 59.0.
+pub fn performer_weight_kg(p: &Performer) -> Option<f64> {
+    let s = p.weight.as_deref()?;
+    let num: f64 = s
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect::<String>()
+        .parse()
+        .ok()?;
+    if num <= 0.0 {
+        return None;
+    }
+    if s.to_lowercase().contains("lb") {
+        Some(num / 2.205)
+    } else {
+        Some(num)
+    }
+}
+
+/// Normalised height (0–1 over ~145–185cm); 0.5 (neutral) when unknown.
+fn height_f64(p: &Performer) -> f64 {
+    performer_height_cm(p)
+        .map(|h| ((h - 145.0) / 40.0).clamp(0.0, 1.0))
+        .unwrap_or(0.5)
+}
+
+/// Normalised weight (0–1 over ~45–95kg); 0.5 (neutral) when unknown.
+fn weight_f64(p: &Performer) -> f64 {
+    performer_weight_kg(p)
+        .map(|w| ((w - 45.0) / 50.0).clamp(0.0, 1.0))
+        .unwrap_or(0.5)
+}
+
 fn str_to_id(val: Option<&str>, options: &[&str]) -> f64 {
     let v = val.unwrap_or("Unknown");
     options
@@ -323,6 +368,8 @@ pub fn feature_vector(p: &Performer) -> Option<FeatureVec> {
     let hip = hip_f64(p)?;
     let cup = cup_score_f64(p);
     let age = age_f64(p);
+    let height = height_f64(p);
+    let weight = weight_f64(p);
     let inv_whr = (1.0 - whr.clamp(0.5, 1.0) / 0.5).clamp(0.0, 1.0);
 
     let eth = str_to_id(
@@ -348,14 +395,17 @@ pub fn feature_vector(p: &Performer) -> Option<FeatureVec> {
         &["Blue", "Brown", "Green", "Grey", "Hazel", "Red"],
     );
 
-    // Weights: WHR and hips most important for "similar butt/build"
+    // Weights: WHR and hips dominate; height/weight capture overall stature
+    // (e.g. a "shortstack" — short + curvy — vs the same measurements on a
+    // tall frame), so they carry real weight too.
     Some(FeatureVec {
         name: p.name.clone(),
-        // physique dims (higher weight via repetition)
         values: vec![
-            inv_whr * 3.0, // WHR × 3 — most important for butt/lower body shape
+            inv_whr * 3.0, // WHR × 3 — butt / lower-body shape
             hip * 2.0,     // hip size × 2
+            height * 2.0,  // stature × 2 — short vs tall changes the whole build
             cup * 1.5,     // cup × 1.5
+            weight * 1.5,  // weight × 1.5 — slight vs heavy frame
             age * 1.0,     // age
             // appearance dims (lower weight)
             eth * 0.5,
@@ -383,8 +433,8 @@ impl FeatureVec {
 
     /// Max possible distance given the weight vector
     fn max_distance() -> f64 {
-        // sqrt(sum of squared max differences per dimension)
-        let max_vals = [3.0_f64, 2.0, 1.5, 1.0, 0.5, 0.3, 0.2];
+        // sqrt(sum of squared max differences per dimension); order matches feature_vector
+        let max_vals = [3.0_f64, 2.0, 2.0, 1.5, 1.5, 1.0, 0.5, 0.3, 0.2];
         max_vals.iter().map(|v| v.powi(2)).sum::<f64>().sqrt()
     }
 
@@ -479,6 +529,32 @@ pub fn score_against(candidate: &Performer, reference: &Performer) -> f64 {
                 score += 2.0;
             } else if diff <= 0.06 {
                 score += 1.0;
+            }
+        }
+    }
+
+    // Height / stature (only when reference has it) — within ~5cm = full credit
+    if let Some(rh) = performer_height_cm(reference) {
+        max += 2.0;
+        if let Some(ch) = performer_height_cm(candidate) {
+            let diff = (rh - ch).abs();
+            if diff <= 3.0 {
+                score += 2.0;
+            } else if diff <= 7.0 {
+                score += 1.0;
+            }
+        }
+    }
+
+    // Weight / frame (only when reference has it) — within ~5kg = full credit
+    if let Some(rw) = performer_weight_kg(reference) {
+        max += 1.5;
+        if let Some(cw) = performer_weight_kg(candidate) {
+            let diff = (rw - cw).abs();
+            if diff <= 4.0 {
+                score += 1.5;
+            } else if diff <= 9.0 {
+                score += 0.75;
             }
         }
     }
