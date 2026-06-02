@@ -11,8 +11,30 @@ use luminary::database::Database;
 use luminary::image_cache::ImageCache;
 use luminary::models::SearchFilters;
 use luminary::scraper::Scraper;
+use luminary::stashdb::StashdbClient;
 use luminary::tpdb::TpdbClient;
 use luminary::{config, embedder, image_cache, models, recommender};
+
+/// Builds the list of images to feed the centroid embedder: StashDB's multi-image
+/// array first (when a key is configured), then TPDB's face/profile/gallery.
+/// Capped to bound CPU cost (~5s per image on CPU).
+async fn build_centroid_urls(p: &models::Performer, stash: Option<&StashdbClient>) -> Vec<String> {
+    let mut urls: Vec<String> = Vec::new();
+    if let Some(s) = stash {
+        for u in s.image_urls(&p.name, 3).await {
+            if !urls.contains(&u) {
+                urls.push(u);
+            }
+        }
+    }
+    for u in face_image_urls(p) {
+        if !urls.contains(&u) {
+            urls.push(u);
+        }
+    }
+    urls.truncate(4);
+    urls
+}
 
 /// Collects up to a few distinct image URLs for a performer, best face first,
 /// for building a robust centroid face embedding.
@@ -303,7 +325,7 @@ async fn main() -> anyhow::Result<()> {
             manage_alias(&db, alias, canonical, remove)?;
         }
         Commands::Embed => {
-            embed_all(&db)?;
+            embed_all(&db).await?;
         }
         Commands::Warm { limit } => {
             warm(&db, limit).await?;
@@ -338,8 +360,14 @@ async fn add_performers(db: &Database, names: Vec<String>) -> anyhow::Result<()>
     );
     println!();
 
-    let api_key = config::Config::load().resolve_api_key().ok();
+    let cfg = config::Config::load();
+    let api_key = cfg.resolve_api_key().ok();
     let tpdb_client = api_key.as_ref().map(|key| TpdbClient::new(key.clone()));
+    let stash_client = cfg
+        .stashdb_key
+        .as_ref()
+        .filter(|k| !k.is_empty())
+        .map(|k| StashdbClient::new(k.clone()));
     let scraper = Scraper::new();
 
     if tpdb_client.is_some() {
@@ -416,7 +444,8 @@ async fn add_performers(db: &Database, names: Vec<String>) -> anyhow::Result<()>
                             format!("({}, {})", performer.body_type, source).bright_black()
                         );
                         // Build a robust centroid embedding from several images
-                        let urls = face_image_urls(&performer);
+                        // (StashDB multi-image + TPDB face/profile/gallery)
+                        let urls = build_centroid_urls(&performer, stash_client.as_ref()).await;
                         if !urls.is_empty() {
                             match embedder::generate_centroid_embedding(&urls) {
                                 Some(emb) => {
@@ -1422,13 +1451,20 @@ fn manage_alias(
     Ok(())
 }
 
-fn embed_all(db: &Database) -> anyhow::Result<()> {
+async fn embed_all(db: &Database) -> anyhow::Result<()> {
     let pending = db.get_performers_without_embedding()?;
 
     if pending.is_empty() {
         println!("{}", "All performers already have face embeddings.".green());
         return Ok(());
     }
+
+    let cfg = config::Config::load();
+    let stash = cfg
+        .stashdb_key
+        .as_ref()
+        .filter(|k| !k.is_empty())
+        .map(|k| StashdbClient::new(k.clone()));
 
     println!(
         "{}",
@@ -1446,7 +1482,7 @@ fn embed_all(db: &Database) -> anyhow::Result<()> {
     let mut skipped = 0;
 
     for p in &pending {
-        let urls = face_image_urls(p);
+        let urls = build_centroid_urls(p, stash.as_ref()).await;
         if urls.is_empty() {
             println!(
                 "  {} {} — no image URL",
@@ -1662,6 +1698,16 @@ fn configure(key: Option<String>, value: Option<String>) -> anyhow::Result<()> {
                 "api-key:".bright_black(),
                 key_status.bright_white()
             );
+            let stash_status = if cfg.stashdb_key.as_deref().is_some_and(|k| !k.is_empty()) {
+                "set (image enrichment on)"
+            } else {
+                "not set"
+            };
+            println!(
+                "  {} {}",
+                "stashdb-key:".bright_black(),
+                stash_status.bright_white()
+            );
             println!();
             println!(
                 "{}",
@@ -1671,11 +1717,20 @@ fn configure(key: Option<String>, value: Option<String>) -> anyhow::Result<()> {
                 "{}",
                 "  api-key <key>: store your ThePornDB API key".bright_black()
             );
+            println!(
+                "{}",
+                "  stashdb-key <key>: store a StashDB key for extra face images".bright_black()
+            );
         }
         (Some("api-key"), Some(val)) => {
             cfg.api_key = Some(val.to_string());
             cfg.save()?;
             println!("{} api-key stored", "Updated:".green());
+        }
+        (Some("stashdb-key"), Some(val)) => {
+            cfg.stashdb_key = Some(val.to_string());
+            cfg.save()?;
+            println!("{} stashdb-key stored", "Updated:".green());
         }
         (Some("gender"), Some(val)) => match config::GenderFilter::from_str(val) {
             Some(filter) => {
@@ -1697,7 +1752,7 @@ fn configure(key: Option<String>, value: Option<String>) -> anyhow::Result<()> {
         },
         (Some(k), _) => {
             println!(
-                "{} Unknown setting '{}'. Available: gender, api-key",
+                "{} Unknown setting '{}'. Available: gender, api-key, stashdb-key",
                 "Error:".red(),
                 k
             );

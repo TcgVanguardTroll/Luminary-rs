@@ -73,6 +73,9 @@ pub struct Config {
     /// ThePornDB API key. The TPDB_API_KEY env var takes precedence when set.
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Optional StashDB API key, used to enrich performers with extra face images.
+    #[serde(default)]
+    pub stashdb_key: Option<String>,
 }
 
 impl Default for Config {
@@ -80,6 +83,7 @@ impl Default for Config {
         Config {
             gender_filter: GenderFilter::Female,
             api_key: None,
+            stashdb_key: None,
         }
     }
 }

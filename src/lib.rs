@@ -17,4 +17,5 @@ pub mod image_cache;
 pub mod models;
 pub mod recommender;
 pub mod scraper;
+pub mod stashdb;
 pub mod tpdb;
