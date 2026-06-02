@@ -28,15 +28,42 @@ pub fn generate_seg_embeddings(image_urls: &[String]) -> Result<Vec<Option<Vec<f
 /// vector passed its gates.
 pub type DualVec = (Option<Vec<f32>>, Option<Vec<f32>>);
 
+/// One image's full body-sidecar result: the classifier's coarse `view`
+/// ("side" | "frontal", or None when no pose was detected) plus the pose/frame
+/// and seg/shape vectors (each present only if it passed its gates).
+pub struct BodyView {
+    pub view: Option<String>,
+    pub pose: Option<Vec<f32>>,
+    pub seg: Option<Vec<f32>>,
+}
+
+/// Runs the `--seg` body pass and returns the coarse view plus both vectors per
+/// URL. Ingest pairs `view` with its face pass to resolve the true view: a
+/// "frontal" body *with* a detected face is a front shot, one *without* is a rear
+/// shot (MediaPipe can't tell them apart — see [`crate::source::classify_view`]).
+pub fn generate_body_views(image_urls: &[String]) -> Result<Vec<BodyView>> {
+    let arr = run_sidecar_raw("body_embed.py", &["--seg"], image_urls)?;
+    Ok(arr
+        .into_iter()
+        .map(|entry| BodyView {
+            view: entry
+                .get("view")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            pose: extract_field(&entry, "body"),
+            seg: extract_field(&entry, "seg"),
+        })
+        .collect())
+}
+
 /// Generates BOTH the pose/frame and seg/shape vectors in a single `--seg` pass
 /// (the seg sidecar computes landmarks anyway, so the pose vector is free).
 /// Returns `(pose, seg)` per URL — used by the index builder so one embedding
 /// pass populates both search modes. Halves the cost vs running them separately.
 pub fn generate_dual_embeddings(image_urls: &[String]) -> Result<Vec<DualVec>> {
-    let arr = run_sidecar_raw("body_embed.py", &["--seg"], image_urls)?;
-    Ok(arr
+    Ok(generate_body_views(image_urls)?
         .into_iter()
-        .map(|entry| (extract_field(&entry, "body"), extract_field(&entry, "seg")))
+        .map(|b| (b.pose, b.seg))
         .collect())
 }
 

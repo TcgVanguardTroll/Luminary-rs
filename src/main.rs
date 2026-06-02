@@ -271,6 +271,29 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
+    /// Build the per-image corpus for specific performers: gather multi-angle
+    /// images from every source, identity-verify each face against a seed,
+    /// classify its view (front/rear/side), quality-score it, and store the
+    /// pose/seg/face vectors. The foundation the view-aware body index is built
+    /// from. Incremental and resumable.
+    Ingest {
+        /// Performer(s) to ingest images for
+        #[arg(required = true)]
+        names: Vec<String>,
+        /// Max images to gather per source
+        #[arg(long, default_value_t = 24)]
+        images: usize,
+        /// A hand-picked image URL to include (repeatable) — the `manual` source
+        #[arg(long = "url")]
+        urls: Vec<String>,
+        /// Face-match cosine threshold; below it a detected face is treated as a
+        /// different performer and the image is dropped
+        #[arg(long, default_value_t = 0.3)]
+        id_threshold: f32,
+        /// Re-embed images already in the corpus
+        #[arg(long, default_value_t = false)]
+        force: bool,
+    },
     /// Find performers with a similar body, ranked against the cached index
     BodySearch {
         /// A performer in your library to match against
@@ -426,6 +449,15 @@ async fn main() -> anyhow::Result<()> {
             force,
         } => {
             build_index(&db, limit, images, force).await?;
+        }
+        Commands::Ingest {
+            names,
+            images,
+            urls,
+            id_threshold,
+            force,
+        } => {
+            ingest(&db, names, images, urls, id_threshold, force).await?;
         }
         Commands::BodySearch {
             name,

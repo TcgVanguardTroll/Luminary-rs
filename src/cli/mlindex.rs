@@ -318,3 +318,184 @@ pub(crate) async fn build_index(
     );
     Ok(())
 }
+
+/// The identity anchor for ingest: a performer's cached face embedding, else a
+/// fresh centroid built from their clean profile faces. `None` if neither is
+/// available (a niche performer with no clean face) — ingest then trusts the
+/// gallery instead of face-gating.
+async fn resolve_seed_face(db: &Database, name: &str) -> Option<Vec<f32>> {
+    if let Ok(Some(e)) = db.get_embedding_any(name) {
+        return Some(e);
+    }
+    let p = db.get_performer(name).ok().flatten()?;
+    let cfg = config::Config::load();
+    let stash = cfg
+        .stashdb_key
+        .as_ref()
+        .filter(|k| !k.is_empty())
+        .map(|k| StashdbClient::new(k.clone()));
+    let urls = build_centroid_urls(&p, stash.as_ref()).await;
+    if urls.is_empty() {
+        return None;
+    }
+    embedder::generate_centroid_embedding(&urls).ok().flatten()
+}
+
+/// Build (or extend) the per-image corpus for specific performers. For each one
+/// it gathers multi-angle images from every source, runs a face pass (identity-
+/// verify + presence) and a pose/seg pass (vectors + coarse view) over them,
+/// classifies each image's view, quality-scores it, and writes one `images` row.
+/// Incremental — images already stored are skipped unless `force`. This is the
+/// corpus the view-aware body index is later aggregated from.
+pub(crate) async fn ingest(
+    db: &Database,
+    names: Vec<String>,
+    images_per: usize,
+    manual_urls: Vec<String>,
+    id_threshold: f32,
+    force: bool,
+) -> anyhow::Result<()> {
+    use luminary::database::ImageRow;
+    use luminary::source::{classify_view, quality_score, ImageSource, ManualSource};
+    use std::collections::{BTreeMap, HashSet};
+
+    // The sanctioned image sources. pornpics + pichunter performer pages are
+    // single-performer, so a face-less rear shot can be gallery-trusted. Manual
+    // URLs, when supplied, ride along as their own source.
+    let mut sources: Vec<Box<dyn ImageSource>> = vec![
+        Box::new(PornpicsClient::new()),
+        Box::new(PichunterClient::new()),
+    ];
+    if !manual_urls.is_empty() {
+        sources.push(Box::new(ManualSource { urls: manual_urls }));
+    }
+
+    println!(
+        "{}",
+        format!("Ingesting images for {} performer(s)...", names.len())
+            .bright_cyan()
+            .bold()
+    );
+    println!();
+
+    for name in &names {
+        // Use the canonical performer name (when known) so corpus rows line up
+        // with the rest of the system, which keys on `Performer::name`.
+        let performer = db
+            .get_performer(name)
+            .ok()
+            .flatten()
+            .map(|p| p.name)
+            .unwrap_or_else(|| name.clone());
+
+        let seed = resolve_seed_face(db, &performer).await;
+        if seed.is_none() {
+            println!(
+                "  {} no seed face for {} — identity unverified (gallery-trusted)",
+                "!".yellow(),
+                performer.bright_white()
+            );
+        }
+
+        // Gather candidate URLs from every source, tagged with origin, skipping
+        // ones already in the corpus (unless forced).
+        let existing = if force {
+            HashSet::new()
+        } else {
+            db.existing_image_urls(&performer)?
+        };
+        let mut targets: Vec<(String, &'static str)> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for src in &sources {
+            for u in src.gather(&performer, images_per).await {
+                if !existing.contains(&u) && seen.insert(u.clone()) {
+                    targets.push((u, src.name()));
+                }
+            }
+        }
+        if targets.is_empty() {
+            println!(
+                "  {} {} — no new images",
+                "–".bright_black(),
+                performer.bright_black()
+            );
+            continue;
+        }
+
+        // Two passes over the same URLs (each loads its model once): face for
+        // identity + presence, body for pose/seg vectors + the coarse view.
+        let urls: Vec<String> = targets.iter().map(|(u, _)| u.clone()).collect();
+        let faces = embedder::generate_embeddings(&urls).unwrap_or_default();
+        let bodies = embedder::generate_body_views(&urls).unwrap_or_default();
+
+        let mut kept = 0usize;
+        let mut rejected = 0usize;
+        let mut by_view: BTreeMap<&str, usize> = BTreeMap::new();
+        for (i, (url, source)) in targets.iter().enumerate() {
+            let face = faces.get(i).cloned().flatten();
+            let body = bodies.get(i);
+            let pose = body.and_then(|b| b.pose.clone());
+            let seg = body.and_then(|b| b.seg.clone());
+            let pose_view = body.and_then(|b| b.view.as_deref());
+
+            // Identity gate: a detected face that doesn't match the seed is a
+            // different performer (mixed gallery / co-star) — drop it. A face-less
+            // shot has no `id_sim` and so is never rejected here.
+            let id_sim = match (&face, &seed) {
+                (Some(f), Some(s)) => Some(embedder::cosine_similarity(f, s)),
+                _ => None,
+            };
+            if id_sim.is_some_and(|sim| sim < id_threshold) {
+                rejected += 1;
+                continue;
+            }
+
+            // Nothing usable extracted at all — don't store an empty row.
+            if face.is_none() && pose.is_none() && seg.is_none() {
+                continue;
+            }
+
+            let view = classify_view(pose_view, face.is_some());
+            let quality = quality_score(id_sim, pose.is_some(), seg.is_some());
+            db.save_image(&ImageRow {
+                performer: performer.clone(),
+                url: url.clone(),
+                source: source.to_string(),
+                view: view.to_string(),
+                quality,
+                pose,
+                seg,
+                face,
+            })?;
+            kept += 1;
+            *by_view.entry(view).or_insert(0) += 1;
+        }
+
+        let breakdown = by_view
+            .iter()
+            .map(|(v, n)| format!("{} {}", n, v))
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "  {} {} — {} kept{}, {} rejected",
+            "✓".green(),
+            performer.bright_white(),
+            kept,
+            if breakdown.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", breakdown)
+            },
+            rejected,
+        );
+    }
+
+    println!();
+    println!(
+        "{}",
+        format!("Corpus now holds {} image(s).", db.images_count()?)
+            .green()
+            .bold()
+    );
+    Ok(())
+}

@@ -20,5 +20,6 @@ pub mod pornpics;
 pub mod recommender;
 pub mod region;
 pub mod scraper;
+pub mod source;
 pub mod stashdb;
 pub mod tpdb;
