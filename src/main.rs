@@ -628,10 +628,7 @@ async fn find(
     let mut hips      = hips_arg;
     let mut waist     = waist_arg;
     let mut whr       = whr_arg;
-    let mut tattoo    = tattoo_arg;
-    let mut fake_boobs: Option<bool> = None;
 
-    // Does the looks-like performer have a face embedding we can rank by?
     let face_ranking = looks_like.as_deref()
         .map(|n| db.get_embedding(n).ok().flatten().is_some())
         .unwrap_or(false);
@@ -641,73 +638,59 @@ async fn find(
             .ok_or_else(|| anyhow::anyhow!("'{}' not in database", name))?;
         if ethnicity.is_none() { ethnicity = p.ethnicity.clone(); }
         if hair.is_none()      { hair = p.hair_color.clone(); }
-        // Eye colour is sparse and over-constrains — only use it as a hard
-        // filter when we DON'T have a face embedding to rank by.
         if eye.is_none() && !face_ranking { eye = p.eye_color.clone(); }
     }
 
-    if let Some(ref name) = body_like {
+    // Body reference (butt + boobs are wanted): explicit --body-like, else --looks-like.
+    let body_ref_name = body_like.clone().or_else(|| looks_like.clone());
+    if let Some(ref name) = body_ref_name {
         let p = db.get_performer(name)?
             .ok_or_else(|| anyhow::anyhow!("'{}' not in database", name))?;
-
         if let Some(ref m) = p.measurements {
             let parts: Vec<&str> = m.split('-').collect();
-            // Cup from bust (e.g. "34B" → "B")
             if cup.is_none() {
-                let cup_letter = parts.first()
+                cup = parts.first()
                     .map(|s| s.trim_start_matches(|c: char| c.is_ascii_digit()).to_uppercase())
                     .filter(|s| !s.is_empty());
-                cup = cup_letter;
             }
-            // Waist (middle measurement)
-            if waist.is_none() {
-                waist = parts.get(1).and_then(|s| s.trim().parse().ok());
-            }
-            // Hips (last measurement, strip trailing letters)
             if hips.is_none() {
-                hips = parts.get(2).and_then(|s| {
-                    s.trim().trim_end_matches(|c: char| !c.is_ascii_digit()).parse().ok()
-                });
+                hips = parts.get(2).and_then(|s|
+                    s.trim().trim_end_matches(|c: char| !c.is_ascii_digit()).parse().ok());
             }
         }
-        // WHR captures the butt/lower-body shape — pull from the reference performer
+        // WHR — the butt/build shape, a real filter (you're attracted to butt)
         if whr.is_none() {
             whr = recommender::performer_whr(&p);
         }
-        // Bust: natural vs enhanced is part of "the boobs"
-        if fake_boobs.is_none() {
-            fake_boobs = p.fake_boobs;
-        }
-        // Tattoos (e.g. tramp stamp) — prefer a lower-back tattoo, else any back tattoo
-        if tattoo.is_none() {
-            let locs = recommender::parse_tattoos(p.tattoos.as_deref());
-            tattoo = locs.iter().find(|t| t.contains("lower back")).cloned()
-                .or_else(|| locs.iter().find(|t| t.contains("back")).cloned());
-        }
     }
+    if whr.is_some() { waist = None; } // redundant with WHR
 
-    // When WHR is active, the standalone waist filter is redundant
-    // (waist = WHR × hips) and would over-constrain — drop it.
-    if whr.is_some() {
-        waist = None;
-    }
+    // ── Tattoo: SOFT bonus only — preferred, never required ───────────────
+    let tattoo_pref: Option<String> = tattoo_arg.clone().or_else(|| {
+        body_ref_name.as_ref()
+            .and_then(|n| db.get_performer(n).ok().flatten())
+            .and_then(|p| {
+                let locs = recommender::parse_tattoos(p.tattoos.as_deref());
+                locs.iter().find(|t| t.contains("lower back")).cloned()
+                    .or_else(|| locs.iter().find(|t| t.contains("back")).cloned())
+            })
+    });
 
     // ── Display criteria ──────────────────────────────────────────────────
     println!("{}", "Searching for performers with:".bright_cyan().bold());
     let mut criteria: Vec<String> = vec![];
-    if let Some(ref n) = looks_like  { criteria.push(format!("face like {}", n.bright_white())); }
-    if let Some(ref n) = body_like   { criteria.push(format!("body like {}", n.bright_white())); }
-    if let Some(ref v) = ethnicity   { criteria.push(format!("ethnicity: {}", v.bright_white())); }
-    if let Some(ref v) = hair        { criteria.push(format!("hair: {}", v.bright_white())); }
-    if let Some(ref v) = eye         { criteria.push(format!("eyes: {}", v.bright_white())); }
-    if let Some(ref v) = cup         { criteria.push(format!("cup: {}", v.bright_white())); }
-    if let Some(v) = hips            { criteria.push(format!("hips: {}\" ±4", v.to_string().bright_white())); }
-    if let Some(v) = waist           { criteria.push(format!("waist: {}\" ±4", v.to_string().bright_white())); }
-    if let Some(v) = whr             { criteria.push(format!("waist-to-hip ratio: {:.3} ±0.05 (butt/build shape)", v).bright_white().to_string()); }
-    if let Some(v) = fake_boobs      { criteria.push(format!("boobs: {}", if v { "enhanced" } else { "natural" }).bright_white().to_string()); }
-    if let Some(ref v) = tattoo      { criteria.push(format!("tattoo: {} (e.g. tramp stamp)", v.bright_white())); }
-    if let Some(v) = age_min         { criteria.push(format!("age ≥ {}", v.to_string().bright_white())); }
-    if let Some(v) = age_max         { criteria.push(format!("age ≤ {}", v.to_string().bright_white())); }
+    if let Some(ref n) = looks_like { criteria.push(format!("face like {}", n.bright_white())); }
+    if let Some(ref n) = body_like  { criteria.push(format!("body like {}", n.bright_white())); }
+    if let Some(ref v) = ethnicity  { criteria.push(format!("ethnicity: {}", v.bright_white())); }
+    if let Some(ref v) = hair       { criteria.push(format!("hair: {}", v.bright_white())); }
+    if let Some(ref v) = eye        { criteria.push(format!("eyes: {}", v.bright_white())); }
+    if let Some(ref v) = cup        { criteria.push(format!("cup: {}", v.bright_white())); }
+    if let Some(v) = hips           { criteria.push(format!("hips: {}\" ±4", v.to_string().bright_white())); }
+    if let Some(v) = waist          { criteria.push(format!("waist: {}\" ±4", v.to_string().bright_white())); }
+    if let Some(v) = whr            { criteria.push(format!("waist-to-hip ratio: {:.3} ±0.05 (butt shape)", v).bright_white().to_string()); }
+    if let Some(ref v) = tattoo_pref { criteria.push(format!("tattoo bonus: {} (preferred, not required)", v.bright_white())); }
+    if let Some(v) = age_min        { criteria.push(format!("age ≥ {}", v.to_string().bright_white())); }
+    if let Some(v) = age_max        { criteria.push(format!("age ≤ {}", v.to_string().bright_white())); }
     for c in &criteria { println!("  · {}", c); }
     println!();
 
@@ -719,38 +702,19 @@ async fn find(
         ethnicity.as_deref(), hair.as_deref(), eye.as_deref(),
         cup.as_deref(), hips, waist, whr, age_min, age_max, &cfg.gender_filter, limit * 8,
     ).await?;
-
     results.retain(|p| !known_names.contains(&p.name.to_lowercase()));
 
-    // Client-side filters TPDB can't do: tattoo location + natural/enhanced
-    if let Some(ref kw) = tattoo {
-        results.retain(|p| recommender::has_tattoo(p, kw));
-    }
-    if let Some(fb) = fake_boobs {
-        results.retain(|p| p.fake_boobs.map_or(true, |c| c == fb));
-    }
-
-    // ── Reference vectors for ranking ─────────────────────────────────────
-    // Face embedding from the looks-like performer
+    // ── Ranking references ────────────────────────────────────────────────
     let ref_embedding = looks_like.as_deref()
         .and_then(|name| db.get_embedding(name).ok().flatten());
-    // k-NN body feature vector from the body-like performer
-    let ref_body_vec = body_like.as_deref()
-        .and_then(|name| db.get_performer(name).ok().flatten())
+    let ref_body_vec = body_ref_name.as_ref()
+        .and_then(|n| db.get_performer(n).ok().flatten())
         .and_then(|p| recommender::feature_vector(&p));
 
-    // Generating a face embedding costs ~5s/candidate on CPU, so cap how many
-    // we embed on the fly. Pre-rank by body similarity (cheap) and only embed
-    // the most promising candidates; cached embeddings are always free.
+    // Cap on-the-fly embeddings; pre-rank by body distance so we spend them well.
     const MAX_ONTHEFLY_EMBEDS: usize = 16;
-
     if ref_embedding.is_some() {
-        // Pre-rank by body feature distance to the looks-like performer so the
-        // candidates we spend embeddings on are the most physically relevant.
-        let ref_self_vec = looks_like.as_deref()
-            .and_then(|n| db.get_performer(n).ok().flatten())
-            .and_then(|p| recommender::feature_vector(&p));
-        if let Some(rv) = &ref_self_vec {
+        if let Some(rv) = &ref_body_vec {
             results.sort_by(|a, b| {
                 let da = recommender::feature_vector(a).map(|v| rv.distance(&v)).unwrap_or(f64::MAX);
                 let db_ = recommender::feature_vector(b).map(|v| rv.distance(&v)).unwrap_or(f64::MAX);
@@ -761,18 +725,17 @@ async fn find(
 
     let mut embeds_done = 0usize;
 
-    // Score each candidate: (face_sim, body_sim, performer)
-    let mut scored: Vec<(Option<f32>, Option<f64>, models::Performer)> = results
+    // Score: rank by face (if available) else body; tattoo adds a small bonus.
+    // (score, face_sim, body_sim, has_stamp, performer)
+    let mut scored: Vec<(f64, Option<f32>, Option<f64>, bool, models::Performer)> = results
         .into_iter()
         .map(|p| {
             let face = ref_embedding.as_ref().and_then(|ref_emb| {
-                // Always use a cached embedding; only generate fresh ones up to the cap
                 let emb = db.get_embedding(&p.name).ok().flatten()
                     .or_else(|| {
                         if embeds_done >= MAX_ONTHEFLY_EMBEDS { return None; }
                         embeds_done += 1;
-                        p.face_url.as_deref()
-                            .or(p.profile_image_url.as_deref())
+                        p.face_url.as_deref().or(p.profile_image_url.as_deref())
                             .and_then(|url| embedder::generate_embedding(url).ok()
                                 .inspect(|e| { let _ = db.save_embedding(&p.name, e); }))
                     });
@@ -781,25 +744,19 @@ async fn find(
             let body = ref_body_vec.as_ref().and_then(|rv| {
                 recommender::feature_vector(&p).map(|cv| rv.similarity_pct(&cv))
             });
-            (face, body, p)
+            let has_stamp = tattoo_pref.as_ref()
+                .map_or(false, |kw| recommender::has_tattoo(&p, kw));
+
+            // Base score = face if we have it, else body. Tattoo adds +5 bonus.
+            let base = face.map(|f| embedder::similarity_pct(f) as f64)
+                .or(body)
+                .unwrap_or(0.0);
+            let score = base + if has_stamp { 5.0 } else { 0.0 };
+            (score, face, body, has_stamp, p)
         })
         .collect();
 
-    // Ranking priority: face similarity (looks-like) > body k-NN (body-like) > as-is
-    let sort_mode = if ref_embedding.is_some() {
-        scored.sort_by(|a, b| b.0.unwrap_or(-1.0)
-            .partial_cmp(&a.0.unwrap_or(-1.0))
-            .unwrap_or(std::cmp::Ordering::Equal));
-        "sorted by face similarity"
-    } else if ref_body_vec.is_some() {
-        scored.sort_by(|a, b| b.1.unwrap_or(-1.0)
-            .partial_cmp(&a.1.unwrap_or(-1.0))
-            .unwrap_or(std::cmp::Ordering::Equal));
-        "sorted by body/build similarity"
-    } else {
-        ""
-    };
-
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(limit);
 
     if scored.is_empty() {
@@ -807,32 +764,29 @@ async fn find(
         return Ok(());
     }
 
-    println!("{}", format!("{} results{}:",
-        scored.len(),
-        if sort_mode.is_empty() { String::new() } else { format!(" ({})", sort_mode) }
-    ).bright_cyan().bold());
+    let rank_by = if ref_embedding.is_some() { "face similarity" } else { "body/build similarity" };
+    println!("{}", format!("Top {} matches (ranked by {}, +tattoo bonus):", scored.len(), rank_by)
+        .bright_cyan().bold());
     println!();
 
-    for (i, (face, body, p)) in scored.iter().enumerate() {
+    for (i, (_score, face, body, has_stamp, p)) in scored.iter().enumerate() {
         let age_str = p.age.map(|a| format!(", {}", recommender::age_bucket(a))).unwrap_or_default();
-        // waist/hips + WHR for build comparison
         let meas_str = p.measurements.as_deref().map(|m| {
             let parts: Vec<&str> = m.split('-').collect();
             if parts.len() >= 3 {
                 let whr_str = recommender::performer_whr(p)
                     .map(|r| format!(" whr {:.2}", r)).unwrap_or_default();
-                format!(", {}w {}h{}",
-                    parts[1].trim(),
-                    parts[2].trim().trim_end_matches(|c: char| !c.is_ascii_digit()),
-                    whr_str)
+                format!(", {}w {}h{}", parts[1].trim(),
+                    parts[2].trim().trim_end_matches(|c: char| !c.is_ascii_digit()), whr_str)
             } else { String::new() }
         }).unwrap_or_default();
 
         let mut tags = String::new();
         if let Some(s) = face { tags.push_str(&format!("  face {:.0}%", embedder::similarity_pct(*s))); }
         if let Some(b) = body { tags.push_str(&format!("  body {:.0}%", b)); }
+        let stamp = if *has_stamp { "  +stamp".to_string() } else { String::new() };
 
-        println!("{}. {} {}{}",
+        println!("{}. {} {}{}{}",
             (i + 1).to_string().bright_black(),
             p.name.bright_white().bold(),
             format!("({}, {}{}{}{}{})",
@@ -844,11 +798,12 @@ async fn find(
                 age_str,
             ).bright_black(),
             tags.bright_cyan(),
+            stamp.bright_green(),
         );
     }
     println!();
     if ref_embedding.is_none() && looks_like.is_some() {
-        println!("{}", "  Tip: run 'luminary embed' to generate face embeddings for ML-powered face similarity".bright_black());
+        println!("{}", "  Tip: run 'luminary embed' first for ML face-similarity ranking".bright_black());
     }
     println!("{}", "Use 'luminary add <name>' to add any to your profile.".bright_black());
     Ok(())
