@@ -169,17 +169,20 @@ impl TpdbClient {
         performer
     }
 
-    /// Attribute-based search — all params are optional, combined server-side.
+    /// Attribute-based search — all params optional, combined server-side where supported.
+    /// Hip min is applied server-side; waist range and hip max are filtered client-side.
     pub async fn search_by_attributes(
         &self,
-        ethnicity:   Option<&str>,
-        hair_colour: Option<&str>,
-        eye_colour:  Option<&str>,
-        cup:         Option<&str>,
-        age_min:     Option<u32>,
-        age_max:     Option<u32>,
+        ethnicity:     Option<&str>,
+        hair_colour:   Option<&str>,
+        eye_colour:    Option<&str>,
+        cup:           Option<&str>,
+        hips_target:   Option<u32>,
+        waist_target:  Option<u32>,
+        age_min:       Option<u32>,
+        age_max:       Option<u32>,
         gender_filter: &GenderFilter,
-        fetch: usize,
+        fetch:         usize,
     ) -> Result<Vec<Performer>> {
         let mut url = format!("{}/performers?per_page={}", TPDB_API_BASE, fetch);
 
@@ -196,9 +199,13 @@ impl TpdbClient {
             url.push_str(&format!("&eye_colour={}", urlencoding::encode(&to_title_case(e))));
         }
         if let Some(c) = cup {
-            // Cup takes just the letter(s) in uppercase: "B", "D", "DD", "DDD"
             let cup_letter = c.trim_start_matches(|ch: char| ch.is_ascii_digit()).to_uppercase();
             url.push_str(&format!("&cup={}", urlencoding::encode(&cup_letter)));
+        }
+        // Hip: use server-side minimum (target - 4 inches)
+        if let Some(h) = hips_target {
+            let hip_min = h.saturating_sub(4);
+            url.push_str(&format!("&hip={}&hip_operation=%3E%3D", hip_min));
         }
         if let Some(a) = age_min {
             url.push_str(&format!("&age={}&age_operation=%3E%3D", a));
@@ -225,7 +232,27 @@ impl TpdbClient {
             .map(|p| self.convert_to_performer(p))
             .collect();
 
-        // Filter age_max client-side (API only supports one age comparison)
+        // Client-side: hip upper bound, waist range, age max
+        if let Some(h) = hips_target {
+            let hip_max = h + 4;
+            performers.retain(|p| {
+                // Keep if no hip data (can't verify) or within range
+                p.measurements.as_deref()
+                    .and_then(|m| m.split('-').nth(2))
+                    .and_then(|s| s.trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<u32>().ok())
+                    .map_or(false, |hip| hip >= h.saturating_sub(4) && hip <= hip_max)
+            });
+        }
+        if let Some(w) = waist_target {
+            performers.retain(|p| {
+                p.measurements.as_deref()
+                    .and_then(|m| m.split('-').nth(1))
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .map_or(false, |waist| {
+                        waist >= w.saturating_sub(4) && waist <= w + 4
+                    })
+            });
+        }
         if let Some(max) = age_max {
             performers.retain(|p| p.age.map_or(true, |a| a <= max));
         }

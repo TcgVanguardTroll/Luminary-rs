@@ -79,10 +79,10 @@ enum Commands {
     },
     /// Search by mixing attributes from stored performers or manual values
     Find {
-        /// Copy face/look attributes (ethnicity, hair, eye) from this performer
+        /// Copy face attributes (ethnicity, hair, eye) from this performer
         #[arg(long)]
         looks_like: Option<String>,
-        /// Copy body attributes (cup size) from this performer
+        /// Copy body shape (hips, waist, cup) from this performer
         #[arg(long)]
         body_like: Option<String>,
         /// Hair color (Blonde, Brunette, Black, Red, Auburn)
@@ -97,6 +97,12 @@ enum Commands {
         /// Cup size (A, B, C, D, DD, DDD)
         #[arg(long)]
         cup: Option<String>,
+        /// Target hip measurement in inches (searches ±4 inches)
+        #[arg(long)]
+        hips: Option<u32>,
+        /// Target waist measurement in inches (searches ±4 inches)
+        #[arg(long)]
+        waist: Option<u32>,
         /// Minimum age
         #[arg(long)]
         age_min: Option<u32>,
@@ -173,8 +179,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Recommend { limit } => {
             recommend(&db, limit).await?;
         }
-        Commands::Find { looks_like, body_like, hair, eye, ethnicity, cup, age_min, age_max, limit } => {
-            find(&db, looks_like, body_like, hair, eye, ethnicity, cup, age_min, age_max, limit).await?;
+        Commands::Find { looks_like, body_like, hair, eye, ethnicity, cup, hips, waist, age_min, age_max, limit } => {
+            find(&db, looks_like, body_like, hair, eye, ethnicity, cup, hips, waist, age_min, age_max, limit).await?;
         }
         Commands::Similar { name, limit } => {
             similar(&db, &name, limit).await?;
@@ -542,6 +548,8 @@ async fn find(
     eye_arg:     Option<String>,
     eth_arg:     Option<String>,
     cup_arg:     Option<String>,
+    hips_arg:    Option<u32>,
+    waist_arg:   Option<u32>,
     age_min:     Option<u32>,
     age_max:     Option<u32>,
     limit:       usize,
@@ -550,10 +558,12 @@ async fn find(
     let cfg = config::Config::load();
 
     // ── Pull attributes from named performers ─────────────────────────────
-    let mut ethnicity  = eth_arg;
-    let mut hair       = hair_arg;
-    let mut eye        = eye_arg;
-    let mut cup        = cup_arg;
+    let mut ethnicity = eth_arg;
+    let mut hair      = hair_arg;
+    let mut eye       = eye_arg;
+    let mut cup       = cup_arg;
+    let mut hips      = hips_arg;
+    let mut waist     = waist_arg;
 
     if let Some(ref name) = looks_like {
         let p = db.get_performer(name)?
@@ -566,26 +576,42 @@ async fn find(
     if let Some(ref name) = body_like {
         let p = db.get_performer(name)?
             .ok_or_else(|| anyhow::anyhow!("'{}' not in database", name))?;
-        if cup.is_none() {
-            // Extract cup from measurements or cupsize
-            cup = p.measurements.as_deref().map(|m| {
-                let bust = m.split('-').next().unwrap_or("");
-                bust.trim_start_matches(|c: char| c.is_ascii_digit()).to_uppercase()
-            }).filter(|s| !s.is_empty());
+
+        if let Some(ref m) = p.measurements {
+            let parts: Vec<&str> = m.split('-').collect();
+            // Cup from bust (e.g. "34B" → "B")
+            if cup.is_none() {
+                let cup_letter = parts.first()
+                    .map(|s| s.trim_start_matches(|c: char| c.is_ascii_digit()).to_uppercase())
+                    .filter(|s| !s.is_empty());
+                cup = cup_letter;
+            }
+            // Waist (middle measurement)
+            if waist.is_none() {
+                waist = parts.get(1).and_then(|s| s.trim().parse().ok());
+            }
+            // Hips (last measurement, strip trailing letters)
+            if hips.is_none() {
+                hips = parts.get(2).and_then(|s| {
+                    s.trim().trim_end_matches(|c: char| !c.is_ascii_digit()).parse().ok()
+                });
+            }
         }
     }
 
-    // ── Display what we're searching for ──────────────────────────────────
+    // ── Display criteria ──────────────────────────────────────────────────
     println!("{}", "Searching for performers with:".bright_cyan().bold());
     let mut criteria: Vec<String> = vec![];
-    if let Some(ref name) = looks_like  { criteria.push(format!("looks like {}", name.bright_white())); }
-    if let Some(ref name) = body_like   { criteria.push(format!("body like {}", name.bright_white())); }
-    if let Some(ref v) = ethnicity      { criteria.push(format!("ethnicity: {}", v.bright_white())); }
-    if let Some(ref v) = hair           { criteria.push(format!("hair: {}", v.bright_white())); }
-    if let Some(ref v) = eye            { criteria.push(format!("eyes: {}", v.bright_white())); }
-    if let Some(ref v) = cup            { criteria.push(format!("cup: {}", v.bright_white())); }
-    if let Some(v) = age_min            { criteria.push(format!("age ≥ {}", v.to_string().bright_white())); }
-    if let Some(v) = age_max            { criteria.push(format!("age ≤ {}", v.to_string().bright_white())); }
+    if let Some(ref n) = looks_like  { criteria.push(format!("face like {}", n.bright_white())); }
+    if let Some(ref n) = body_like   { criteria.push(format!("body like {}", n.bright_white())); }
+    if let Some(ref v) = ethnicity   { criteria.push(format!("ethnicity: {}", v.bright_white())); }
+    if let Some(ref v) = hair        { criteria.push(format!("hair: {}", v.bright_white())); }
+    if let Some(ref v) = eye         { criteria.push(format!("eyes: {}", v.bright_white())); }
+    if let Some(ref v) = cup         { criteria.push(format!("cup: {}", v.bright_white())); }
+    if let Some(v) = hips            { criteria.push(format!("hips: {}\" ±4", v.to_string().bright_white())); }
+    if let Some(v) = waist           { criteria.push(format!("waist: {}\" ±4", v.to_string().bright_white())); }
+    if let Some(v) = age_min         { criteria.push(format!("age ≥ {}", v.to_string().bright_white())); }
+    if let Some(v) = age_max         { criteria.push(format!("age ≤ {}", v.to_string().bright_white())); }
     for c in &criteria { println!("  · {}", c); }
     println!();
 
@@ -595,7 +621,7 @@ async fn find(
     let client = TpdbClient::new(api_key);
     let mut results = client.search_by_attributes(
         ethnicity.as_deref(), hair.as_deref(), eye.as_deref(),
-        cup.as_deref(), age_min, age_max, &cfg.gender_filter, limit * 4,
+        cup.as_deref(), hips, waist, age_min, age_max, &cfg.gender_filter, limit * 5,
     ).await?;
 
     results.retain(|p| !known_names.contains(&p.name.to_lowercase()));
@@ -610,14 +636,25 @@ async fn find(
     println!();
     for (i, p) in results.iter().enumerate() {
         let age_str = p.age.map(|a| format!(", {}", recommender::age_bucket(a))).unwrap_or_default();
+        // Extract waist/hips from measurements for display
+        let meas_str = p.measurements.as_deref().map(|m| {
+            let parts: Vec<&str> = m.split('-').collect();
+            if parts.len() >= 3 {
+                format!(", {}w {}h",
+                    parts[1].trim(),
+                    parts[2].trim().trim_end_matches(|c: char| !c.is_ascii_digit())
+                )
+            } else { String::new() }
+        }).unwrap_or_default();
         println!("{}. {} {}",
             (i + 1).to_string().bright_black(),
             p.name.bright_white().bold(),
-            format!("({}, {}{}{}{})",
+            format!("({}, {}{}{}{}{})",
                 p.body_type,
                 p.ethnicity.as_deref().unwrap_or("?"),
                 p.hair_color.as_ref().map(|h| format!(", {}", h)).unwrap_or_default(),
                 p.eye_color.as_ref().map(|e| format!(", {} eyes", e)).unwrap_or_default(),
+                meas_str,
                 age_str,
             ).bright_black()
         );
