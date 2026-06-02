@@ -178,6 +178,35 @@ pub fn body_centroid(vecs: &[Vec<f32>]) -> Option<Vec<f32>> {
     Some(sum)
 }
 
+/// Quality-weighted mean of body-proportion vectors: each `(vector, weight)`
+/// contributes in proportion to its weight, so cleaner/higher-confidence frames
+/// dominate the centroid. Like [`body_centroid`] these are ratios, not unit
+/// embeddings, so a plain weighted arithmetic mean is correct. Skips empty,
+/// dimension-mismatched, and non-positive-weight entries; None if nothing
+/// usable remains. Used by the corpus aggregator to fold an image's `quality`
+/// into the cached centroids.
+pub fn weighted_body_centroid(vecs: &[(Vec<f32>, f32)]) -> Option<Vec<f32>> {
+    let dims = vecs.iter().find(|(v, _)| !v.is_empty())?.0.len();
+    let mut sum = vec![0.0_f32; dims];
+    let mut wsum = 0.0_f32;
+    for (v, w) in vecs {
+        if v.len() != dims || *w <= 0.0 {
+            continue;
+        }
+        for (s, x) in sum.iter_mut().zip(v.iter()) {
+            *s += *x * *w;
+        }
+        wsum += *w;
+    }
+    if wsum <= 0.0 {
+        return None;
+    }
+    for s in sum.iter_mut() {
+        *s /= wsum;
+    }
+    Some(sum)
+}
+
 /// Body-proportion similarity as a 0–100%. Per-dimension weighted Euclidean
 /// distance mapped to a percentage (closer frame ⇒ higher).
 pub fn body_similarity_pct(a: &[f32], b: &[f32]) -> f64 {
@@ -457,5 +486,18 @@ mod tests {
         // Old rows stored embeddings as JSON text — must still decode.
         let legacy = b"[0.5,-0.25,1.0]";
         assert_eq!(blob_to_embedding(legacy), Some(vec![0.5_f32, -0.25, 1.0]));
+    }
+
+    #[test]
+    fn weighted_centroid_favours_high_quality_and_skips_junk() {
+        // (0*1 + 10*3)/4 = 7.5 ; (0*1 + 20*3)/4 = 15 — the heavier frame wins.
+        let v = vec![(vec![0.0, 0.0], 1.0), (vec![10.0, 20.0], 3.0)];
+        assert_eq!(weighted_body_centroid(&v), Some(vec![7.5, 15.0]));
+        // Non-positive weights and empty input collapse to None.
+        assert_eq!(weighted_body_centroid(&[(vec![1.0], 0.0)]), None);
+        assert_eq!(weighted_body_centroid(&[]), None);
+        // A dimension-mismatched entry is skipped, not allowed to corrupt.
+        let mixed = vec![(vec![2.0], 1.0), (vec![1.0, 1.0], 5.0)];
+        assert_eq!(weighted_body_centroid(&mixed), Some(vec![2.0]));
     }
 }

@@ -294,6 +294,14 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         force: bool,
     },
+    /// Rebuild the cached body index from the per-image corpus that `ingest`
+    /// fills — quality-weighted and view-aware (only frontal frames feed the
+    /// pose/seg centroids). Cheap and pure; re-run to re-tune without
+    /// re-embedding. With no names, rebuilds everyone who has ingested images.
+    Aggregate {
+        /// Performer(s) to rebuild (default: everyone with ingested images)
+        names: Vec<String>,
+    },
     /// Find performers with a similar body, ranked against the cached index
     BodySearch {
         /// A performer in your library to match against
@@ -458,6 +466,9 @@ async fn main() -> anyhow::Result<()> {
             force,
         } => {
             ingest(&db, names, images, urls, id_threshold, force).await?;
+        }
+        Commands::Aggregate { names } => {
+            aggregate(&db, names)?;
         }
         Commands::BodySearch {
             name,

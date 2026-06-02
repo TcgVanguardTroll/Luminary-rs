@@ -499,3 +499,83 @@ pub(crate) async fn ingest(
     );
     Ok(())
 }
+
+/// Rebuild the cached body-vector index for performers from their per-image
+/// corpus (the rows `ingest` fills). Quality-weighted and view-aware — only
+/// frontal (front/rear) frames feed the pose/seg centroids. Cheap and pure, so
+/// re-run it to re-tune aggregation without re-embedding. With no names, rebuilds
+/// every performer that has images.
+pub(crate) fn aggregate(db: &Database, names: Vec<String>) -> anyhow::Result<()> {
+    let targets = if names.is_empty() {
+        db.images_performers()?
+    } else {
+        names
+    };
+    if targets.is_empty() {
+        println!(
+            "{}",
+            "No ingested images yet — run 'luminary ingest <name>' first.".yellow()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "{}",
+        format!(
+            "Aggregating {} performer(s) from the image corpus...",
+            targets.len()
+        )
+        .bright_cyan()
+        .bold()
+    );
+    println!();
+
+    let mut written = 0usize;
+    for name in &targets {
+        let images = db.load_images(name, None)?;
+        let (pose, seg, n) = luminary::database::aggregate_views(&images);
+        if pose.is_none() && seg.is_none() {
+            println!(
+                "  {} {} — no frontal frames ({} image(s))",
+                "–".bright_black(),
+                name.bright_black(),
+                images.len()
+            );
+            continue;
+        }
+        // Carry the stored performer record into the index when we have it, so
+        // body-search keeps its attributes; otherwise a bare name is enough.
+        let performer = db
+            .get_performer(name)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| models::Performer::new(name.clone()));
+        db.save_body_index(&performer, pose.as_deref(), seg.as_deref(), n)?;
+        written += 1;
+        println!(
+            "  {} {} {}",
+            "✓".green(),
+            name.bright_white(),
+            format!(
+                "{} frontal frame(s) → pose {} / shape {}",
+                n,
+                if pose.is_some() { "✓" } else { "—" },
+                if seg.is_some() { "✓" } else { "—" },
+            )
+            .bright_black()
+        );
+    }
+
+    println!();
+    println!(
+        "{}",
+        format!(
+            "Aggregated {} performer(s); index now holds {}.",
+            written,
+            db.body_index_count()?
+        )
+        .green()
+        .bold()
+    );
+    Ok(())
+}

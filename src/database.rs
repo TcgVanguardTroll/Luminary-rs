@@ -34,6 +34,33 @@ pub struct ImageRow {
     pub face: Option<Vec<f32>>,
 }
 
+/// Aggregates a performer's per-image corpus into quality-weighted body
+/// centroids for the cached index. Only frontal views (front/rear) feed the pose
+/// and seg centroids — a side/profile frame collapses shoulder width and
+/// corrupts both ratio vectors (the seg sidecar already rejects side; this also
+/// drops any side pose vector). Each image contributes in proportion to its
+/// `quality`. Returns `(pose_centroid, seg_centroid, n_frames)`, where
+/// `n_frames` is how many frontal frames contributed.
+pub fn aggregate_views(images: &[ImageRow]) -> (Option<Vec<f32>>, Option<Vec<f32>>, usize) {
+    let is_frontal = |v: &str| v == "front" || v == "rear";
+    let pose: Vec<(Vec<f32>, f32)> = images
+        .iter()
+        .filter(|im| is_frontal(&im.view))
+        .filter_map(|im| im.pose.clone().map(|p| (p, im.quality)))
+        .collect();
+    let seg: Vec<(Vec<f32>, f32)> = images
+        .iter()
+        .filter(|im| is_frontal(&im.view))
+        .filter_map(|im| im.seg.clone().map(|s| (s, im.quality)))
+        .collect();
+    let n = pose.len().max(seg.len());
+    (
+        crate::embedder::weighted_body_centroid(&pose),
+        crate::embedder::weighted_body_centroid(&seg),
+        n,
+    )
+}
+
 /// Database manager for storing performers
 pub struct Database {
     conn: Connection,
@@ -401,6 +428,18 @@ impl Database {
             .query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0))?)
     }
 
+    /// Distinct performer names with at least one image in the corpus — the set
+    /// `aggregate` rebuilds when no explicit names are given.
+    pub fn images_performers(&self) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT DISTINCT performer FROM images ORDER BY performer")?;
+        let names = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(names)
+    }
+
     /// Saves a name alias pointing to a canonical performer name
     pub fn save_alias(&self, alias: &str, canonical: &str) -> Result<()> {
         self.conn.execute(
@@ -687,5 +726,37 @@ mod tests {
         db.save_image(&img("u1", "side", None)).unwrap();
         assert_eq!(db.images_count().unwrap(), 2);
         assert_eq!(db.load_images("Star", Some("side")).unwrap().len(), 1);
+    }
+
+    fn vrow(view: &str, quality: f32, pose: Option<Vec<f32>>, seg: Option<Vec<f32>>) -> ImageRow {
+        ImageRow {
+            performer: "Star".to_string(),
+            url: format!("u-{}-{}", view, quality),
+            source: "pornpics".to_string(),
+            view: view.to_string(),
+            quality,
+            pose,
+            seg,
+            face: None,
+        }
+    }
+
+    #[test]
+    fn aggregate_weights_by_quality_and_excludes_side() {
+        let images = vec![
+            vrow("front", 3.0, Some(vec![4.0]), Some(vec![2.0])),
+            vrow("rear", 1.0, Some(vec![0.0]), None),
+            // A side frame's (bogus) vectors must not reach either centroid.
+            vrow("side", 9.0, Some(vec![100.0]), Some(vec![100.0])),
+        ];
+        let (pose, seg, n) = aggregate_views(&images);
+        assert_eq!(pose, Some(vec![3.0])); // (4*3 + 0*1)/4, side excluded
+        assert_eq!(seg, Some(vec![2.0])); // only the front frame carries seg
+        assert_eq!(n, 2); // two frontal pose frames contributed
+
+        // With only side frames there's nothing frontal to aggregate.
+        let only_side = vec![vrow("side", 1.0, Some(vec![1.0]), Some(vec![1.0]))];
+        let (p, s, n) = aggregate_views(&only_side);
+        assert!(p.is_none() && s.is_none() && n == 0);
     }
 }
