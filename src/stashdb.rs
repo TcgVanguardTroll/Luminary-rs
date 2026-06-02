@@ -142,10 +142,12 @@ impl StashdbClient {
         per_page: usize,
     ) -> Result<Vec<Performer>> {
         // Build the input inline (enums must be unquoted in GraphQL).
+        // Sort by popularity so we surface real, well-documented performers
+        // (good names + multiple photos) rather than sparse placeholder entries.
         let mut fields = vec![
             format!("per_page: {}", per_page),
-            "sort: NAME".to_string(),
-            "direction: ASC".to_string(),
+            "sort: POPULARITY".to_string(),
+            "direction: DESC".to_string(),
         ];
         if let Some(g) = gender {
             fields.push(format!("gender: {}", to_enum(g)));
@@ -187,7 +189,13 @@ impl StashdbClient {
             .map(|d| d.query_performers.performers)
             .unwrap_or_default();
 
-        Ok(performers.into_iter().map(|p| p.into_performer()).collect())
+        // Drop placeholder entries (empty or purely-numeric names) — they have
+        // no usable identity and are usually scene-only stubs.
+        Ok(performers
+            .into_iter()
+            .map(|p| p.into_performer())
+            .filter(|p| !p.name.trim().is_empty() && !p.name.chars().all(|c| c.is_ascii_digit()))
+            .collect())
     }
 }
 

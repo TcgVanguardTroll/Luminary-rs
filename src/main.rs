@@ -1692,6 +1692,8 @@ async fn face_search(
         .into_iter()
         .filter(|(_, p)| cfg.gender_filter.matches(p.gender.as_deref()))
         .filter(|(_, p)| p.name.to_lowercase() != reference.name.to_lowercase())
+        // Hide placeholder entries (empty / purely-numeric names)
+        .filter(|(_, p)| !p.name.trim().is_empty() && !p.name.chars().all(|c| c.is_ascii_digit()))
         .map(|(e, p)| (embedder::cosine_similarity(&ref_emb, &e), p))
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -1715,13 +1717,18 @@ async fn face_search(
             .age
             .map(|a| format!(", {}", recommender::age_bucket(a)))
             .unwrap_or_default();
+        let body = if p.body_type.is_empty() {
+            "?"
+        } else {
+            &p.body_type
+        };
         println!(
             "{}. {} {}  {}",
             (i + 1).to_string().bright_black(),
             p.name.bright_white().bold(),
             format!(
                 "({}, {}{}{})",
-                p.body_type,
+                body,
                 p.ethnicity.as_deref().unwrap_or("?"),
                 p.hair_color
                     .as_ref()
