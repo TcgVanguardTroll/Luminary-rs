@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use crate::config::GenderFilter;
 use crate::models::Performer;
 
 const TPDB_API_BASE: &str = "https://api.theporndb.net";
@@ -24,6 +25,8 @@ struct TpdbPerformerResponse {
 struct TpdbPerformer {
     id: String,
     name: String,
+    #[serde(default)]
+    gender: Option<String>,
     #[serde(default)]
     extras: TpdbExtras,
     #[serde(default)]
@@ -131,6 +134,7 @@ impl TpdbClient {
         performer.profile_image_url = tpdb.image.or_else(|| tpdb.images.first().cloned());
         performer.gallery_urls = tpdb.images;
 
+        performer.gender = tpdb.gender;
         performer.source = Some("ThePornDB".to_string());
         performer.source_url = Some(format!("https://theporndb.net/performers/{}", tpdb.id));
         performer.last_updated = Some(chrono::Utc::now().to_rfc3339());
@@ -142,12 +146,16 @@ impl TpdbClient {
     pub async fn get_recommendations(
         &self,
         ethnicity: Option<&str>,
+        gender_filter: &GenderFilter,
         limit: usize,
     ) -> Result<Vec<Performer>> {
         // Try attribute filter first (TPDB v0 filter params)
         let mut url = format!("{}/performers?per_page={}", TPDB_API_BASE, limit * 3);
         if let Some(eth) = ethnicity {
             url.push_str(&format!("&ethnicity={}", urlencoding::encode(eth)));
+        }
+        if let Some(gender) = gender_filter.tpdb_value() {
+            url.push_str(&format!("&gender={}", urlencoding::encode(gender)));
         }
 
         log::info!("Fetching recommendations: {}", url);
@@ -164,9 +172,13 @@ impl TpdbClient {
                 .context("Failed to parse TPDB recommendations")?;
 
             if !search_result.data.is_empty() {
-                return Ok(search_result.data.into_iter()
+                let results: Vec<Performer> = search_result.data.into_iter()
+                    .filter(|p| gender_filter.matches(p.gender.as_deref()))
                     .map(|p| self.convert_to_performer(p))
-                    .collect());
+                    .collect();
+                if !results.is_empty() {
+                    return Ok(results);
+                }
             }
         }
 
@@ -191,6 +203,7 @@ impl TpdbClient {
                 let result: TpdbSearchResponse = resp.json().await
                     .context("Failed to parse fallback response")?;
                 return Ok(result.data.into_iter()
+                    .filter(|p| gender_filter.matches(p.gender.as_deref()))
                     .map(|p| self.convert_to_performer(p))
                     .collect());
             }

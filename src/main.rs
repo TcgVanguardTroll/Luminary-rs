@@ -8,6 +8,7 @@ mod image_cache;
 mod scraper;
 mod tpdb;
 mod recommender;
+mod config;
 
 use database::Database;
 use models::SearchFilters;
@@ -73,9 +74,15 @@ enum Commands {
     Profile,
     /// Get performer recommendations based on your profile
     Recommend {
-        /// How many recommendations to fetch
         #[arg(long, default_value_t = 10)]
         limit: usize,
+    },
+    /// View or change settings
+    Config {
+        /// Setting to change (e.g. gender)
+        key: Option<String>,
+        /// New value (e.g. female, male, trans-female, trans-male, any)
+        value: Option<String>,
     },
 }
 
@@ -129,6 +136,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Recommend { limit } => {
             recommend(&db, limit).await?;
+        }
+        Commands::Config { key, value } => {
+            configure(key, value)?;
         }
     }
 
@@ -393,6 +403,7 @@ async fn recommend(db: &Database, limit: usize) -> anyhow::Result<()> {
 
     let api_key = std::env::var("TPDB_API_KEY")
         .context("TPDB_API_KEY not set — needed for recommendations")?;
+    let cfg = config::Config::load();
 
     let known_names: std::collections::HashSet<String> = performers
         .iter()
@@ -417,7 +428,7 @@ async fn recommend(db: &Database, limit: usize) -> anyhow::Result<()> {
             else if specificity == 1 { None }
             else { None };
 
-        let mut found = client.get_recommendations(top_ethnicity, limit * 3).await?;
+        let mut found = client.get_recommendations(top_ethnicity, &cfg.gender_filter, limit * 3).await?;
         found.retain(|p| !known_names.contains(&p.name.to_lowercase()));
 
         if !found.is_empty() {
@@ -458,6 +469,46 @@ async fn recommend(db: &Database, limit: usize) -> anyhow::Result<()> {
 
     println!();
     println!("{}", "Use 'starfinder add <name>' to add any to your profile.".bright_black());
+
+    Ok(())
+}
+
+fn configure(key: Option<String>, value: Option<String>) -> anyhow::Result<()> {
+    use colored::*;
+    let mut cfg = config::Config::load();
+
+    match (key.as_deref(), value.as_deref()) {
+        (None, _) => {
+            // Show current config
+            println!("{}", "Starfinder Settings".bright_cyan().bold());
+            println!("{}", "═".repeat(35).bright_black());
+            println!("  {} {}",
+                "gender:".bright_black(),
+                cfg.gender_filter.display().bright_white()
+            );
+            println!();
+            println!("{}", "  Valid values: female, male, trans-female, trans-male, any".bright_black());
+        }
+        (Some("gender"), Some(val)) => {
+            match config::GenderFilter::from_str(val) {
+                Some(filter) => {
+                    cfg.gender_filter = filter;
+                    cfg.save()?;
+                    println!("{} gender = {}",
+                        "Updated:".green(),
+                        cfg.gender_filter.display().bright_white()
+                    );
+                }
+                None => {
+                    println!("{} Unknown value '{}'. Use: female, male, trans-female, trans-male, any",
+                        "Error:".red(), val);
+                }
+            }
+        }
+        (Some(k), _) => {
+            println!("{} Unknown setting '{}'. Available: gender", "Error:".red(), k);
+        }
+    }
 
     Ok(())
 }
