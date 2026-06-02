@@ -110,6 +110,9 @@ enum Commands {
         /// Require a tattoo at this location, e.g. "lower back" (tramp stamp)
         #[arg(long)]
         tattoo: Option<String>,
+        /// Match the face only — ignore body, boobs, and tattoo entirely
+        #[arg(long, default_value_t = false)]
+        face_only: bool,
         /// Minimum age
         #[arg(long)]
         age_min: Option<u32>,
@@ -198,8 +201,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Recommend { limit } => {
             recommend(&db, limit).await?;
         }
-        Commands::Find { looks_like, body_like, hair, eye, ethnicity, cup, hips, waist, whr, tattoo, age_min, age_max, limit } => {
-            find(&db, looks_like, body_like, hair, eye, ethnicity, cup, hips, waist, whr, tattoo, age_min, age_max, limit).await?;
+        Commands::Find { looks_like, body_like, hair, eye, ethnicity, cup, hips, waist, whr, tattoo, face_only, age_min, age_max, limit } => {
+            find(&db, looks_like, body_like, hair, eye, ethnicity, cup, hips, waist, whr, tattoo, face_only, age_min, age_max, limit).await?;
         }
         Commands::Similar { name, limit } => {
             similar(&db, &name, limit).await?;
@@ -613,6 +616,7 @@ async fn find(
     waist_arg:   Option<u32>,
     whr_arg:     Option<f64>,
     tattoo_arg:  Option<String>,
+    face_only:   bool,
     age_min:     Option<u32>,
     age_max:     Option<u32>,
     limit:       usize,
@@ -641,8 +645,13 @@ async fn find(
         if eye.is_none() && !face_ranking { eye = p.eye_color.clone(); }
     }
 
-    // Body reference (butt + boobs are wanted): explicit --body-like, else --looks-like.
-    let body_ref_name = body_like.clone().or_else(|| looks_like.clone());
+    // Body reference (butt + boobs): explicit --body-like, else --looks-like.
+    // Skipped entirely in --face-only mode.
+    let body_ref_name = if face_only {
+        None
+    } else {
+        body_like.clone().or_else(|| looks_like.clone())
+    };
     if let Some(ref name) = body_ref_name {
         let p = db.get_performer(name)?
             .ok_or_else(|| anyhow::anyhow!("'{}' not in database", name))?;
@@ -665,16 +674,18 @@ async fn find(
     }
     if whr.is_some() { waist = None; } // redundant with WHR
 
-    // ── Tattoo: SOFT bonus only — preferred, never required ───────────────
-    let tattoo_pref: Option<String> = tattoo_arg.clone().or_else(|| {
-        body_ref_name.as_ref()
-            .and_then(|n| db.get_performer(n).ok().flatten())
-            .and_then(|p| {
-                let locs = recommender::parse_tattoos(p.tattoos.as_deref());
-                locs.iter().find(|t| t.contains("lower back")).cloned()
-                    .or_else(|| locs.iter().find(|t| t.contains("back")).cloned())
-            })
-    });
+    // ── Tattoo: SOFT bonus only — preferred, never required (off in face-only) ──
+    let tattoo_pref: Option<String> = if face_only { None } else {
+        tattoo_arg.clone().or_else(|| {
+            body_ref_name.as_ref()
+                .and_then(|n| db.get_performer(n).ok().flatten())
+                .and_then(|p| {
+                    let locs = recommender::parse_tattoos(p.tattoos.as_deref());
+                    locs.iter().find(|t| t.contains("lower back")).cloned()
+                        .or_else(|| locs.iter().find(|t| t.contains("back")).cloned())
+                })
+        })
+    };
 
     // ── Display criteria ──────────────────────────────────────────────────
     println!("{}", "Searching for performers with:".bright_cyan().bold());
