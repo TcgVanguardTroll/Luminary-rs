@@ -15,6 +15,7 @@ pub mod database;
 pub mod embedder;
 pub mod image_cache;
 pub mod models;
+pub mod pichunter;
 pub mod pornpics;
 pub mod recommender;
 pub mod region;
