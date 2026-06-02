@@ -74,6 +74,31 @@ struct TpdbExtras {
     hips: Option<String>,
     #[serde(default)]
     gender: Option<String>,
+    #[serde(default)]
+    tattoos: Option<String>,
+    #[serde(default)]
+    piercings: Option<String>,
+    #[serde(default, deserialize_with = "flexible_bool")]
+    fake_boobs: Option<bool>,
+}
+
+/// TPDB returns fake_boobs as a JSON bool, a string ("True"/"1"), or null.
+/// Accept all of them gracefully.
+fn flexible_bool<'de, D>(deserializer: D) -> std::result::Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = serde_json::Value::deserialize(deserializer)?;
+    Ok(match v {
+        serde_json::Value::Bool(b) => Some(b),
+        serde_json::Value::String(s) => {
+            let s = s.to_lowercase();
+            Some(s == "true" || s == "1" || s == "yes")
+        }
+        serde_json::Value::Number(n) => Some(n.as_i64().unwrap_or(0) != 0),
+        _ => None,
+    })
 }
 
 impl TpdbClient {
@@ -165,6 +190,9 @@ impl TpdbClient {
 
         performer.gender = tpdb.gender.or(tpdb.extras.gender);
         performer.tpdb_id = Some(tpdb.numeric_id);
+        performer.tattoos = tpdb.extras.tattoos;
+        performer.piercings = tpdb.extras.piercings;
+        performer.fake_boobs = tpdb.extras.fake_boobs;
         performer.source = Some("ThePornDB".to_string());
         performer.source_url = Some(format!("https://theporndb.net/performers/{}", tpdb.id));
         performer.last_updated = Some(chrono::Utc::now().to_rfc3339());

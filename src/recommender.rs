@@ -348,16 +348,84 @@ pub fn score_performer(performer: &Performer, tree: &[PreferenceNode]) -> f64 {
 pub fn score_against(candidate: &Performer, reference: &Performer) -> f64 {
     let mut score = 0.0;
     let mut max   = 0.0;
+
+    // Build / physique
     max += 5.0; if candidate.body_type == reference.body_type { score += 5.0; }
-    max += 3.0; if candidate.ethnicity == reference.ethnicity  { score += 3.0; }
+
+    // Bust: cup size match + natural-vs-enhanced match
+    max += 2.0;
+    if let (Some(rc), Some(cc)) = (cup_letter(reference), cup_letter(candidate)) {
+        if rc == cc { score += 2.0; }
+        else if cup_rank(&rc).abs_diff(cup_rank(&cc)) == 1 { score += 1.0; } // one cup off
+    }
+    max += 1.0;
+    if candidate.fake_boobs.is_some() && candidate.fake_boobs == reference.fake_boobs {
+        score += 1.0;
+    }
+
+    // WHR / butt shape
+    max += 2.0;
+    if let (Some(rw), Some(cw)) = (performer_whr(reference), performer_whr(candidate)) {
+        let diff = (rw - cw).abs();
+        if diff <= 0.03 { score += 2.0; }
+        else if diff <= 0.06 { score += 1.0; }
+    }
+
+    // Tattoos (tramp stamp etc.) — Jaccard overlap of locations
+    max += 2.0;
+    score += tattoo_overlap(reference.tattoos.as_deref(), candidate.tattoos.as_deref()) * 2.0;
+
+    // Demographics
+    max += 3.0; if candidate.ethnicity == reference.ethnicity { score += 3.0; }
     max += 2.0;
     if let (Some(ca), Some(ra)) = (candidate.age, reference.age) {
         if age_bucket(ca) == age_bucket(ra) { score += 2.0; }
     }
     max += 1.0; if candidate.hair_color == reference.hair_color { score += 1.0; }
     max += 0.5; if candidate.eye_color  == reference.eye_color  { score += 0.5; }
+
     if max == 0.0 { return 0.0; }
     (score / max * 100.0_f64).round()
+}
+
+/// Extracts the cup letter(s) from measurements, e.g. "36DD-27-38" → "DD"
+pub fn cup_letter(p: &Performer) -> Option<String> {
+    let bust = p.measurements.as_deref()?.split('-').next()?;
+    let cup = bust.trim_start_matches(|c: char| c.is_ascii_digit()).to_uppercase();
+    if cup.is_empty() { None } else { Some(cup) }
+}
+
+fn cup_rank(cup: &str) -> u32 {
+    match cup {
+        "AA" | "AAA" => 0, "A" => 1, "B" => 2, "C" => 3,
+        "D" => 4, "DD" | "E" => 5, "DDD" | "F" => 6,
+        "G" | "H" | "I" | "J" | "K" => 7, _ => 2,
+    }
+}
+
+/// Parses a semicolon-delimited tattoo string into normalised location tokens.
+pub fn parse_tattoos(s: Option<&str>) -> Vec<String> {
+    s.map(|t| t.split(';')
+        .map(|x| x.trim().to_lowercase())
+        .filter(|x| !x.is_empty())
+        .collect())
+        .unwrap_or_default()
+}
+
+/// Jaccard similarity (0–1) between two performers' tattoo location sets.
+pub fn tattoo_overlap(a: Option<&str>, b: Option<&str>) -> f64 {
+    let sa = parse_tattoos(a);
+    let sb = parse_tattoos(b);
+    if sa.is_empty() || sb.is_empty() { return 0.0; }
+    let intersection = sa.iter().filter(|x| sb.contains(x)).count();
+    let union = sa.len() + sb.len() - intersection;
+    if union == 0 { 0.0 } else { intersection as f64 / union as f64 }
+}
+
+/// True if a performer has a tattoo whose location contains the keyword.
+pub fn has_tattoo(p: &Performer, keyword: &str) -> bool {
+    let kw = keyword.to_lowercase();
+    parse_tattoos(p.tattoos.as_deref()).iter().any(|t| t.contains(&kw))
 }
 
 // ── Flat analysis ─────────────────────────────────────────────────────────────

@@ -107,6 +107,9 @@ enum Commands {
         /// Target waist-to-hip ratio (searches ±0.05), e.g. 0.667 for Dee Siren's build
         #[arg(long)]
         whr: Option<f64>,
+        /// Require a tattoo at this location, e.g. "lower back" (tramp stamp)
+        #[arg(long)]
+        tattoo: Option<String>,
         /// Minimum age
         #[arg(long)]
         age_min: Option<u32>,
@@ -195,8 +198,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Recommend { limit } => {
             recommend(&db, limit).await?;
         }
-        Commands::Find { looks_like, body_like, hair, eye, ethnicity, cup, hips, waist, whr, age_min, age_max, limit } => {
-            find(&db, looks_like, body_like, hair, eye, ethnicity, cup, hips, waist, whr, age_min, age_max, limit).await?;
+        Commands::Find { looks_like, body_like, hair, eye, ethnicity, cup, hips, waist, whr, tattoo, age_min, age_max, limit } => {
+            find(&db, looks_like, body_like, hair, eye, ethnicity, cup, hips, waist, whr, tattoo, age_min, age_max, limit).await?;
         }
         Commands::Similar { name, limit } => {
             similar(&db, &name, limit).await?;
@@ -408,10 +411,21 @@ async fn view_performer(db: &Database, name: &str, _gallery: bool) -> anyhow::Re
                 println!("  {} {}", "Eyes:".bright_black(), eye);
             }
             if let Some(meas) = &performer.measurements {
-                println!("  {} {}", "Measurements:".bright_black(), meas);
+                let boob_tag = match performer.fake_boobs {
+                    Some(true)  => "  (enhanced)",
+                    Some(false) => "  (natural)",
+                    None        => "",
+                };
+                println!("  {} {}{}", "Measurements:".bright_black(), meas, boob_tag.bright_black());
             }
             if let Some(h) = &performer.height {
                 println!("  {} {}", "Height:".bright_black(), h);
+            }
+            if let Some(t) = &performer.tattoos {
+                println!("  {} {}", "Tattoos:".bright_black(), t);
+            }
+            if let Some(p) = &performer.piercings {
+                println!("  {} {}", "Piercings:".bright_black(), p);
             }
             println!();
         }
@@ -598,6 +612,7 @@ async fn find(
     hips_arg:    Option<u32>,
     waist_arg:   Option<u32>,
     whr_arg:     Option<f64>,
+    tattoo_arg:  Option<String>,
     age_min:     Option<u32>,
     age_max:     Option<u32>,
     limit:       usize,
@@ -613,13 +628,22 @@ async fn find(
     let mut hips      = hips_arg;
     let mut waist     = waist_arg;
     let mut whr       = whr_arg;
+    let mut tattoo    = tattoo_arg;
+    let mut fake_boobs: Option<bool> = None;
+
+    // Does the looks-like performer have a face embedding we can rank by?
+    let face_ranking = looks_like.as_deref()
+        .map(|n| db.get_embedding(n).ok().flatten().is_some())
+        .unwrap_or(false);
 
     if let Some(ref name) = looks_like {
         let p = db.get_performer(name)?
             .ok_or_else(|| anyhow::anyhow!("'{}' not in database", name))?;
         if ethnicity.is_none() { ethnicity = p.ethnicity.clone(); }
         if hair.is_none()      { hair = p.hair_color.clone(); }
-        if eye.is_none()       { eye = p.eye_color.clone(); }
+        // Eye colour is sparse and over-constrains — only use it as a hard
+        // filter when we DON'T have a face embedding to rank by.
+        if eye.is_none() && !face_ranking { eye = p.eye_color.clone(); }
     }
 
     if let Some(ref name) = body_like {
@@ -650,6 +674,16 @@ async fn find(
         if whr.is_none() {
             whr = recommender::performer_whr(&p);
         }
+        // Bust: natural vs enhanced is part of "the boobs"
+        if fake_boobs.is_none() {
+            fake_boobs = p.fake_boobs;
+        }
+        // Tattoos (e.g. tramp stamp) — prefer a lower-back tattoo, else any back tattoo
+        if tattoo.is_none() {
+            let locs = recommender::parse_tattoos(p.tattoos.as_deref());
+            tattoo = locs.iter().find(|t| t.contains("lower back")).cloned()
+                .or_else(|| locs.iter().find(|t| t.contains("back")).cloned());
+        }
     }
 
     // When WHR is active, the standalone waist filter is redundant
@@ -670,6 +704,8 @@ async fn find(
     if let Some(v) = hips            { criteria.push(format!("hips: {}\" ±4", v.to_string().bright_white())); }
     if let Some(v) = waist           { criteria.push(format!("waist: {}\" ±4", v.to_string().bright_white())); }
     if let Some(v) = whr             { criteria.push(format!("waist-to-hip ratio: {:.3} ±0.05 (butt/build shape)", v).bright_white().to_string()); }
+    if let Some(v) = fake_boobs      { criteria.push(format!("boobs: {}", if v { "enhanced" } else { "natural" }).bright_white().to_string()); }
+    if let Some(ref v) = tattoo      { criteria.push(format!("tattoo: {} (e.g. tramp stamp)", v.bright_white())); }
     if let Some(v) = age_min         { criteria.push(format!("age ≥ {}", v.to_string().bright_white())); }
     if let Some(v) = age_max         { criteria.push(format!("age ≤ {}", v.to_string().bright_white())); }
     for c in &criteria { println!("  · {}", c); }
@@ -686,6 +722,14 @@ async fn find(
 
     results.retain(|p| !known_names.contains(&p.name.to_lowercase()));
 
+    // Client-side filters TPDB can't do: tattoo location + natural/enhanced
+    if let Some(ref kw) = tattoo {
+        results.retain(|p| recommender::has_tattoo(p, kw));
+    }
+    if let Some(fb) = fake_boobs {
+        results.retain(|p| p.fake_boobs.map_or(true, |c| c == fb));
+    }
+
     // ── Reference vectors for ranking ─────────────────────────────────────
     // Face embedding from the looks-like performer
     let ref_embedding = looks_like.as_deref()
@@ -695,13 +739,38 @@ async fn find(
         .and_then(|name| db.get_performer(name).ok().flatten())
         .and_then(|p| recommender::feature_vector(&p));
 
+    // Generating a face embedding costs ~5s/candidate on CPU, so cap how many
+    // we embed on the fly. Pre-rank by body similarity (cheap) and only embed
+    // the most promising candidates; cached embeddings are always free.
+    const MAX_ONTHEFLY_EMBEDS: usize = 16;
+
+    if ref_embedding.is_some() {
+        // Pre-rank by body feature distance to the looks-like performer so the
+        // candidates we spend embeddings on are the most physically relevant.
+        let ref_self_vec = looks_like.as_deref()
+            .and_then(|n| db.get_performer(n).ok().flatten())
+            .and_then(|p| recommender::feature_vector(&p));
+        if let Some(rv) = &ref_self_vec {
+            results.sort_by(|a, b| {
+                let da = recommender::feature_vector(a).map(|v| rv.distance(&v)).unwrap_or(f64::MAX);
+                let db_ = recommender::feature_vector(b).map(|v| rv.distance(&v)).unwrap_or(f64::MAX);
+                da.partial_cmp(&db_).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
+    }
+
+    let mut embeds_done = 0usize;
+
     // Score each candidate: (face_sim, body_sim, performer)
     let mut scored: Vec<(Option<f32>, Option<f64>, models::Performer)> = results
         .into_iter()
         .map(|p| {
             let face = ref_embedding.as_ref().and_then(|ref_emb| {
+                // Always use a cached embedding; only generate fresh ones up to the cap
                 let emb = db.get_embedding(&p.name).ok().flatten()
                     .or_else(|| {
+                        if embeds_done >= MAX_ONTHEFLY_EMBEDS { return None; }
+                        embeds_done += 1;
                         p.face_url.as_deref()
                             .or(p.profile_image_url.as_deref())
                             .and_then(|url| embedder::generate_embedding(url).ok()
