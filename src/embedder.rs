@@ -100,3 +100,44 @@ fn find_script() -> Result<PathBuf> {
             "face_embed.py not found. Place it alongside the luminary binary."
         ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identical_vectors_are_perfectly_similar() {
+        let v = vec![0.1, 0.2, 0.3, 0.4];
+        assert!((cosine_similarity(&v, &v) - 1.0).abs() < 1e-6);
+        assert!((similarity_pct(cosine_similarity(&v, &v)) - 100.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn opposite_vectors_are_least_similar() {
+        let a = vec![1.0, 0.0];
+        let b = vec![-1.0, 0.0];
+        assert!((cosine_similarity(&a, &b) + 1.0).abs() < 1e-6); // -1
+        assert!(similarity_pct(-1.0) < 1.0);                     // ~0%
+    }
+
+    #[test]
+    fn orthogonal_vectors_are_midpoint() {
+        let a = vec![1.0, 0.0];
+        let b = vec![0.0, 1.0];
+        assert!(cosine_similarity(&a, &b).abs() < 1e-6);          // 0
+        assert!((similarity_pct(0.0) - 50.0).abs() < 1e-4);       // 50%
+    }
+
+    #[test]
+    fn mismatched_or_empty_vectors_are_zero() {
+        assert_eq!(cosine_similarity(&[1.0, 2.0], &[1.0]), 0.0);
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn blob_round_trip() {
+        let v = vec![0.5_f32, -0.25, 1.0];
+        let blob = embedding_to_blob(&v);
+        assert_eq!(blob_to_embedding(&blob), Some(v));
+    }
+}

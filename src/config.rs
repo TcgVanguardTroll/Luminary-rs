@@ -30,12 +30,15 @@ impl GenderFilter {
             GenderFilter::Any => true,
             _ => {
                 let Some(g) = gender else { return false };
-                let g = g.to_uppercase();
+                // TPDB returns gender as "Female", "Transgender Female", etc.
+                // Normalise separators so "Transgender_Female" and
+                // "Transgender Female" compare equal.
+                let g = g.to_uppercase().replace('_', " ");
                 match self {
                     GenderFilter::Female      => g == "FEMALE",
                     GenderFilter::Male        => g == "MALE",
-                    GenderFilter::TransFemale => g == "TRANSGENDER_FEMALE",
-                    GenderFilter::TransMale   => g == "TRANSGENDER_MALE",
+                    GenderFilter::TransFemale => g == "TRANSGENDER FEMALE",
+                    GenderFilter::TransMale   => g == "TRANSGENDER MALE",
                     GenderFilter::Any         => true,
                 }
             }
@@ -100,5 +103,57 @@ impl Config {
             .join("luminary");
         std::fs::create_dir_all(&dir)?;
         Ok(dir.join("config.json"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_is_biological_female() {
+        assert_eq!(Config::default().gender_filter, GenderFilter::Female);
+    }
+
+    #[test]
+    fn female_excludes_transgender_female() {
+        let f = GenderFilter::Female;
+        assert!(f.matches(Some("Female")));
+        assert!(f.matches(Some("female")));          // case-insensitive
+        assert!(!f.matches(Some("Transgender Female")));
+        assert!(!f.matches(Some("Male")));
+        assert!(!f.matches(None));                   // unknown gender excluded
+    }
+
+    #[test]
+    fn trans_female_does_not_match_biological_female() {
+        let tf = GenderFilter::TransFemale;
+        assert!(tf.matches(Some("Transgender Female")));
+        assert!(!tf.matches(Some("Female")));
+    }
+
+    #[test]
+    fn any_matches_everything() {
+        let any = GenderFilter::Any;
+        assert!(any.matches(Some("Female")));
+        assert!(any.matches(Some("Transgender Female")));
+        assert!(any.matches(Some("Male")));
+        assert!(any.matches(None));
+    }
+
+    #[test]
+    fn tpdb_value_uses_titlecase_enum() {
+        assert_eq!(GenderFilter::Female.tpdb_value(), Some("Female"));
+        assert_eq!(GenderFilter::TransFemale.tpdb_value(), Some("Transgender Female"));
+        assert_eq!(GenderFilter::Any.tpdb_value(), None);
+    }
+
+    #[test]
+    fn from_str_parses_aliases() {
+        assert_eq!(GenderFilter::from_str("female"), Some(GenderFilter::Female));
+        assert_eq!(GenderFilter::from_str("F"),      Some(GenderFilter::Female));
+        assert_eq!(GenderFilter::from_str("trans-female"), Some(GenderFilter::TransFemale));
+        assert_eq!(GenderFilter::from_str("any"),    Some(GenderFilter::Any));
+        assert_eq!(GenderFilter::from_str("nonsense"), None);
     }
 }

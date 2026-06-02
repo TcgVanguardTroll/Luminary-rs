@@ -349,40 +349,60 @@ pub fn score_against(candidate: &Performer, reference: &Performer) -> f64 {
     let mut score = 0.0;
     let mut max   = 0.0;
 
-    // Build / physique
+    // A dimension only counts toward the max when it's actually applicable
+    // (the reference has the data), so missing data never penalises a match
+    // and an identical performer scores a clean 100%.
+
+    // Build / physique — always present
     max += 5.0; if candidate.body_type == reference.body_type { score += 5.0; }
 
-    // Bust: cup size match + natural-vs-enhanced match
-    max += 2.0;
-    if let (Some(rc), Some(cc)) = (cup_letter(reference), cup_letter(candidate)) {
-        if rc == cc { score += 2.0; }
-        else if cup_rank(&rc).abs_diff(cup_rank(&cc)) == 1 { score += 1.0; } // one cup off
-    }
-    max += 1.0;
-    if candidate.fake_boobs.is_some() && candidate.fake_boobs == reference.fake_boobs {
-        score += 1.0;
+    // Bust: cup size match (only when reference has a cup)
+    if let Some(rc) = cup_letter(reference) {
+        max += 2.0;
+        if let Some(cc) = cup_letter(candidate) {
+            if rc == cc { score += 2.0; }
+            else if cup_rank(&rc).abs_diff(cup_rank(&cc)) == 1 { score += 1.0; }
+        }
     }
 
-    // WHR / butt shape
-    max += 2.0;
-    if let (Some(rw), Some(cw)) = (performer_whr(reference), performer_whr(candidate)) {
-        let diff = (rw - cw).abs();
-        if diff <= 0.03 { score += 2.0; }
-        else if diff <= 0.06 { score += 1.0; }
+    // Natural vs enhanced (only when reference knows)
+    if reference.fake_boobs.is_some() {
+        max += 1.0;
+        if candidate.fake_boobs == reference.fake_boobs { score += 1.0; }
     }
 
-    // Tattoos (tramp stamp etc.) — Jaccard overlap of locations
-    max += 2.0;
-    score += tattoo_overlap(reference.tattoos.as_deref(), candidate.tattoos.as_deref()) * 2.0;
+    // WHR / butt shape (only when reference has measurements)
+    if let Some(rw) = performer_whr(reference) {
+        max += 2.0;
+        if let Some(cw) = performer_whr(candidate) {
+            let diff = (rw - cw).abs();
+            if diff <= 0.03 { score += 2.0; }
+            else if diff <= 0.06 { score += 1.0; }
+        }
+    }
+
+    // Tattoos (only when reference has any)
+    if reference.tattoos.is_some() {
+        max += 2.0;
+        score += tattoo_overlap(reference.tattoos.as_deref(), candidate.tattoos.as_deref()) * 2.0;
+    }
 
     // Demographics
-    max += 3.0; if candidate.ethnicity == reference.ethnicity { score += 3.0; }
-    max += 2.0;
-    if let (Some(ca), Some(ra)) = (candidate.age, reference.age) {
-        if age_bucket(ca) == age_bucket(ra) { score += 2.0; }
+    if reference.ethnicity.is_some() {
+        max += 3.0; if candidate.ethnicity == reference.ethnicity { score += 3.0; }
     }
-    max += 1.0; if candidate.hair_color == reference.hair_color { score += 1.0; }
-    max += 0.5; if candidate.eye_color  == reference.eye_color  { score += 0.5; }
+    if reference.age.is_some() {
+        max += 2.0;
+        if let (Some(ca), Some(ra)) = (candidate.age, reference.age) {
+            if age_bucket(ca) == age_bucket(ra) { score += 2.0; }
+        }
+    }
+    if reference.hair_color.is_some() {
+        max += 1.0; if candidate.hair_color == reference.hair_color { score += 1.0; }
+    }
+    if reference.eye_color.is_some() {
+        max += 0.5; if candidate.eye_color == reference.eye_color { score += 0.5; }
+    }
 
     if max == 0.0 { return 0.0; }
     (score / max * 100.0_f64).round()
@@ -457,5 +477,125 @@ pub fn analyze_preferences(performers: &[Performer]) -> PreferenceAnalysis {
         common_categories: sort_map(categories),
         age_range,
         average_age,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a performer with the fields the algorithms care about.
+    fn perf(name: &str, body: &str, eth: &str, hair: &str, eye: &str,
+            age: u32, measurements: &str, tattoos: Option<&str>) -> Performer {
+        let mut p = Performer::new(name.to_string());
+        p.body_type   = body.to_string();
+        p.ethnicity   = Some(eth.to_string());
+        p.hair_color  = Some(hair.to_string());
+        p.eye_color   = Some(eye.to_string());
+        p.age         = Some(age);
+        p.measurements = Some(measurements.to_string());
+        p.tattoos     = tattoos.map(|s| s.to_string());
+        p
+    }
+
+    #[test]
+    fn age_buckets() {
+        assert_eq!(age_bucket(22), "18-25");
+        assert_eq!(age_bucket(30), "26-35");
+        assert_eq!(age_bucket(40), "36-45");
+        assert_eq!(age_bucket(55), "46+");
+    }
+
+    #[test]
+    fn whr_from_measurements() {
+        let dee = perf("Dee", "Curvy", "Caucasian", "Blonde", "Brown", 40, "34B-24-36", None);
+        // 24 / 36 = 0.667
+        assert_eq!(performer_whr(&dee), Some(0.667));
+
+        let mut no_meas = Performer::new("x".into());
+        no_meas.measurements = None;
+        assert_eq!(performer_whr(&no_meas), None);
+    }
+
+    #[test]
+    fn cup_extraction() {
+        let p = perf("a", "Curvy", "Caucasian", "Blonde", "Green", 50, "36DD-27-38", None);
+        assert_eq!(cup_letter(&p), Some("DD".to_string()));
+        let b = perf("b", "Curvy", "Caucasian", "Blonde", "Green", 50, "34B-24-36", None);
+        assert_eq!(cup_letter(&b), Some("B".to_string()));
+    }
+
+    #[test]
+    fn tattoo_parsing_and_overlap() {
+        let a = Some("back of neck; Lower back");
+        let b = Some("lower back; ankle");
+        // shared: "lower back" → 1 of 3 union = 0.333
+        let ov = tattoo_overlap(a, b);
+        assert!((ov - 0.3333).abs() < 0.01, "overlap was {}", ov);
+
+        // no tattoos → 0
+        assert_eq!(tattoo_overlap(None, b), 0.0);
+    }
+
+    #[test]
+    fn has_tattoo_keyword() {
+        let p = perf("a", "Curvy", "Caucasian", "Blonde", "Green", 50,
+            "36DD-27-38", Some("back of neck; Lower back"));
+        assert!(has_tattoo(&p, "lower back"));
+        assert!(has_tattoo(&p, "neck"));
+        assert!(!has_tattoo(&p, "ankle"));
+    }
+
+    #[test]
+    fn similar_butt_scores_high() {
+        // Two performers with near-identical WHR + cup should score highly.
+        let dee   = perf("Dee",  "Curvy", "Caucasian", "Blonde", "Brown", 40, "34B-24-36", None);
+        let twin  = perf("Twin", "Curvy", "Caucasian", "Blonde", "Brown", 41, "34B-24-36", None);
+        let other = perf("Diff", "Slim",  "Asian",     "Black",  "Brown", 22, "32A-26-34", None);
+        assert!(score_against(&twin, &dee) > score_against(&other, &dee));
+        assert_eq!(score_against(&dee, &dee), 100.0); // identical = perfect
+    }
+
+    #[test]
+    fn idf_downweights_universal_attributes() {
+        // All curvy → body_type IDF should be the minimum (ln(1)+1 = 1.0)
+        let people = vec![
+            perf("a", "Curvy", "Caucasian", "Blonde",   "Green", 50, "36DD-27-38", None),
+            perf("b", "Curvy", "Caucasian", "Brunette", "Blue",  50, "34C-26-36", None),
+            perf("c", "Curvy", "Latin",     "Blonde",   "Brown", 30, "34D-25-36", None),
+        ];
+        let idf = compute_idf_weights(&people);
+        // Curvy appears in all 3 → idf = ln(3/3)+1 = 1.0
+        assert!((idf.body_type["Curvy"] - 1.0).abs() < 1e-9);
+        // Latin appears in 1/3 → idf = ln(3/1)+1 ≈ 2.0986, higher than Caucasian (2/3)
+        assert!(idf.ethnicity["Latin"] > idf.ethnicity["Caucasian"]);
+    }
+
+    #[test]
+    fn feature_vector_distance_orders_by_build() {
+        let dee  = perf("Dee",  "Curvy", "Caucasian", "Blonde", "Brown", 40, "34B-24-36", None);
+        let near = perf("Near", "Curvy", "Caucasian", "Blonde", "Brown", 40, "34B-25-36", None);
+        let far  = perf("Far",  "Slim",  "Asian",     "Black",  "Brown", 22, "32A-28-32", None);
+        let (vd, vn, vf) = (
+            feature_vector(&dee).unwrap(),
+            feature_vector(&near).unwrap(),
+            feature_vector(&far).unwrap(),
+        );
+        assert!(vd.distance(&vn) < vd.distance(&vf));
+        assert!(vd.similarity_pct(&vn) > vd.similarity_pct(&vf));
+    }
+
+    #[test]
+    fn preference_tree_dominant_path() {
+        let people = vec![
+            perf("a", "Curvy", "Caucasian", "Blonde", "Green", 50, "36DD-27-38", None),
+            perf("b", "Curvy", "Caucasian", "Blonde", "Blue",  50, "34DD-26-36", None),
+            perf("c", "Curvy", "Caucasian", "Blonde", "Green", 50, "34D-25-36", None),
+        ];
+        let tree = build_preference_tree(&people);
+        let path = dominant_query_path(&tree);
+        assert_eq!(path[0], "Curvy");
+        assert_eq!(path[1], "Caucasian");
+        assert_eq!(path[2], "Blonde");
     }
 }
