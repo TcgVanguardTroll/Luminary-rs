@@ -173,6 +173,38 @@ pub fn score_performer(performer: &Performer, tree: &[PreferenceNode]) -> f64 {
     score
 }
 
+/// Score a candidate against a specific reference performer (not the full tree).
+/// Returns a 0–100 percentage.
+pub fn score_against(candidate: &Performer, reference: &Performer) -> f64 {
+    let mut score = 0.0;
+    let mut max   = 0.0;
+
+    // Body type (weight 5)
+    max += 5.0;
+    if candidate.body_type == reference.body_type { score += 5.0; }
+
+    // Ethnicity (weight 3)
+    max += 3.0;
+    if candidate.ethnicity == reference.ethnicity { score += 3.0; }
+
+    // Age bucket (weight 2)
+    max += 2.0;
+    if let (Some(ca), Some(ra)) = (candidate.age, reference.age) {
+        if age_bucket(ca) == age_bucket(ra) { score += 2.0; }
+    }
+
+    // Hair colour (weight 1)
+    max += 1.0;
+    if candidate.hair_color == reference.hair_color { score += 1.0; }
+
+    // Eye colour (weight 0.5)
+    max += 0.5;
+    if candidate.eye_color == reference.eye_color { score += 0.5; }
+
+    if max == 0.0 { return 0.0; }
+    (score / max * 100.0_f64).round()
+}
+
 // ── Flat analysis (for stats) ─────────────────────────────────────────────────
 
 pub fn analyze_preferences(performers: &[Performer]) -> PreferenceAnalysis {

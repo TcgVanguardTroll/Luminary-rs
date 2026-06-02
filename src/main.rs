@@ -779,16 +779,49 @@ async fn similar(db: &Database, name: &str, limit: usize) -> anyhow::Result<()> 
 
     let mut results = client.similar_to(&tpdb_uuid, &cfg.gender_filter).await?;
     results.retain(|p| !known_names.contains(&p.name.to_lowercase()));
-    results.truncate(limit);
 
-    if results.is_empty() {
+    // Score each result against the reference performer
+    let ref_embedding = db.get_embedding(&performer.name).ok().flatten();
+    let has_face_ml = ref_embedding.is_some();
+
+    let mut scored: Vec<(f64, Option<f32>, models::Performer)> = results
+        .into_iter()
+        .map(|p| {
+            let attr_score = recommender::score_against(&p, &performer);
+            let face_sim = ref_embedding.as_ref().and_then(|ref_emb| {
+                db.get_embedding(&p.name).ok().flatten()
+                    .map(|e| embedder::cosine_similarity(ref_emb, &e))
+            });
+            // Combined score: attributes (70%) + face similarity (30%) if available
+            let combined = match face_sim {
+                Some(fs) => attr_score * 0.70 + embedder::similarity_pct(fs) as f64 * 0.30,
+                None     => attr_score,
+            };
+            (combined, face_sim, p)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(limit);
+
+    if scored.is_empty() {
         println!("{}", "No similar performers found.".yellow());
         return Ok(());
     }
 
-    for (i, p) in results.iter().enumerate() {
+    println!("{}", format!("Top {} similar to {}{}:",
+        scored.len(),
+        performer.name,
+        if has_face_ml { " (attr + face)" } else { " (attributes)" }
+    ).bright_cyan().bold());
+    println!();
+
+    for (i, (score, face_sim, p)) in scored.iter().enumerate() {
         let age_str = p.age.map(|a| format!(", {}", recommender::age_bucket(a))).unwrap_or_default();
-        println!("{}. {} {}",
+        let face_str = face_sim
+            .map(|s| format!("  face {:.0}%", embedder::similarity_pct(s)))
+            .unwrap_or_default();
+        println!("{}. {} {}  {}{}",
             (i + 1).to_string().bright_black(),
             p.name.bright_white().bold(),
             format!("({}, {}{}{})",
@@ -796,11 +829,16 @@ async fn similar(db: &Database, name: &str, limit: usize) -> anyhow::Result<()> 
                 p.ethnicity.as_deref().unwrap_or("?"),
                 p.hair_color.as_ref().map(|h| format!(", {}", h)).unwrap_or_default(),
                 age_str,
-            ).bright_black()
+            ).bright_black(),
+            format!("match {:.0}%", score).bright_cyan(),
+            face_str.bright_black(),
         );
     }
 
     println!();
+    if !has_face_ml {
+        println!("{}", "  Tip: run 'luminary embed' to add face similarity scoring".bright_black());
+    }
     println!("{}", "Use 'luminary add <name>' to add any to your profile.".bright_black());
     Ok(())
 }
