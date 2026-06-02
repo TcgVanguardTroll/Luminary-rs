@@ -16,10 +16,10 @@ impl GenderFilter {
     /// The value sent to TPDB's gender filter param
     pub fn tpdb_value(&self) -> Option<&'static str> {
         match self {
-            GenderFilter::Female      => Some("FEMALE"),
-            GenderFilter::Male        => Some("MALE"),
-            GenderFilter::TransFemale => Some("TRANSGENDER_FEMALE"),
-            GenderFilter::TransMale   => Some("TRANSGENDER_MALE"),
+            GenderFilter::Female      => Some("Female"),
+            GenderFilter::Male        => Some("Male"),
+            GenderFilter::TransFemale => Some("Transgender Female"),
+            GenderFilter::TransMale   => Some("Transgender Male"),
             GenderFilter::Any         => None,
         }
     }

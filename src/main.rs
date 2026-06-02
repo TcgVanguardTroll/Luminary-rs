@@ -77,6 +77,35 @@ enum Commands {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
+    /// Search by mixing attributes from stored performers or manual values
+    Find {
+        /// Copy face/look attributes (ethnicity, hair, eye) from this performer
+        #[arg(long)]
+        looks_like: Option<String>,
+        /// Copy body attributes (cup size) from this performer
+        #[arg(long)]
+        body_like: Option<String>,
+        /// Hair color (Blonde, Brunette, Black, Red, Auburn)
+        #[arg(long)]
+        hair: Option<String>,
+        /// Eye color (Blue, Green, Brown, Hazel, Grey)
+        #[arg(long)]
+        eye: Option<String>,
+        /// Ethnicity (Caucasian, Latin, Black, Asian, Indian)
+        #[arg(long)]
+        ethnicity: Option<String>,
+        /// Cup size (A, B, C, D, DD, DDD)
+        #[arg(long)]
+        cup: Option<String>,
+        /// Minimum age
+        #[arg(long)]
+        age_min: Option<u32>,
+        /// Maximum age
+        #[arg(long)]
+        age_max: Option<u32>,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
     /// Find performers similar to a specific one
     Similar {
         /// Name of the performer to base results on
@@ -143,6 +172,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Recommend { limit } => {
             recommend(&db, limit).await?;
+        }
+        Commands::Find { looks_like, body_like, hair, eye, ethnicity, cup, age_min, age_max, limit } => {
+            find(&db, looks_like, body_like, hair, eye, ethnicity, cup, age_min, age_max, limit).await?;
         }
         Commands::Similar { name, limit } => {
             similar(&db, &name, limit).await?;
@@ -499,6 +531,99 @@ async fn recommend(db: &Database, limit: usize) -> anyhow::Result<()> {
     println!();
     println!("{}", "Use 'starfinder add <name>' to add any to your profile.".bright_black());
 
+    Ok(())
+}
+
+async fn find(
+    db: &Database,
+    looks_like:  Option<String>,
+    body_like:   Option<String>,
+    hair_arg:    Option<String>,
+    eye_arg:     Option<String>,
+    eth_arg:     Option<String>,
+    cup_arg:     Option<String>,
+    age_min:     Option<u32>,
+    age_max:     Option<u32>,
+    limit:       usize,
+) -> anyhow::Result<()> {
+    let api_key = std::env::var("TPDB_API_KEY").context("TPDB_API_KEY not set")?;
+    let cfg = config::Config::load();
+
+    // ── Pull attributes from named performers ─────────────────────────────
+    let mut ethnicity  = eth_arg;
+    let mut hair       = hair_arg;
+    let mut eye        = eye_arg;
+    let mut cup        = cup_arg;
+
+    if let Some(ref name) = looks_like {
+        let p = db.get_performer(name)?
+            .ok_or_else(|| anyhow::anyhow!("'{}' not in database", name))?;
+        if ethnicity.is_none() { ethnicity = p.ethnicity.clone(); }
+        if hair.is_none()      { hair = p.hair_color.clone(); }
+        if eye.is_none()       { eye = p.eye_color.clone(); }
+    }
+
+    if let Some(ref name) = body_like {
+        let p = db.get_performer(name)?
+            .ok_or_else(|| anyhow::anyhow!("'{}' not in database", name))?;
+        if cup.is_none() {
+            // Extract cup from measurements or cupsize
+            cup = p.measurements.as_deref().map(|m| {
+                let bust = m.split('-').next().unwrap_or("");
+                bust.trim_start_matches(|c: char| c.is_ascii_digit()).to_uppercase()
+            }).filter(|s| !s.is_empty());
+        }
+    }
+
+    // ── Display what we're searching for ──────────────────────────────────
+    println!("{}", "Searching for performers with:".bright_cyan().bold());
+    let mut criteria: Vec<String> = vec![];
+    if let Some(ref name) = looks_like  { criteria.push(format!("looks like {}", name.bright_white())); }
+    if let Some(ref name) = body_like   { criteria.push(format!("body like {}", name.bright_white())); }
+    if let Some(ref v) = ethnicity      { criteria.push(format!("ethnicity: {}", v.bright_white())); }
+    if let Some(ref v) = hair           { criteria.push(format!("hair: {}", v.bright_white())); }
+    if let Some(ref v) = eye            { criteria.push(format!("eyes: {}", v.bright_white())); }
+    if let Some(ref v) = cup            { criteria.push(format!("cup: {}", v.bright_white())); }
+    if let Some(v) = age_min            { criteria.push(format!("age ≥ {}", v.to_string().bright_white())); }
+    if let Some(v) = age_max            { criteria.push(format!("age ≤ {}", v.to_string().bright_white())); }
+    for c in &criteria { println!("  · {}", c); }
+    println!();
+
+    let known_names: std::collections::HashSet<String> = db.get_all_performers()?
+        .iter().map(|p| p.name.to_lowercase()).collect();
+
+    let client = TpdbClient::new(api_key);
+    let mut results = client.search_by_attributes(
+        ethnicity.as_deref(), hair.as_deref(), eye.as_deref(),
+        cup.as_deref(), age_min, age_max, &cfg.gender_filter, limit * 4,
+    ).await?;
+
+    results.retain(|p| !known_names.contains(&p.name.to_lowercase()));
+    results.truncate(limit);
+
+    if results.is_empty() {
+        println!("{}", "No results found. Try relaxing some filters.".yellow());
+        return Ok(());
+    }
+
+    println!("{}", format!("{} results:", results.len()).bright_cyan().bold());
+    println!();
+    for (i, p) in results.iter().enumerate() {
+        let age_str = p.age.map(|a| format!(", {}", recommender::age_bucket(a))).unwrap_or_default();
+        println!("{}. {} {}",
+            (i + 1).to_string().bright_black(),
+            p.name.bright_white().bold(),
+            format!("({}, {}{}{}{})",
+                p.body_type,
+                p.ethnicity.as_deref().unwrap_or("?"),
+                p.hair_color.as_ref().map(|h| format!(", {}", h)).unwrap_or_default(),
+                p.eye_color.as_ref().map(|e| format!(", {} eyes", e)).unwrap_or_default(),
+                age_str,
+            ).bright_black()
+        );
+    }
+    println!();
+    println!("{}", "Use 'starfinder add <name>' to add any to your profile.".bright_black());
     Ok(())
 }
 

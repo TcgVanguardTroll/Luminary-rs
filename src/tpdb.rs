@@ -5,6 +5,15 @@ use crate::models::Performer;
 
 const TPDB_API_BASE: &str = "https://api.theporndb.net";
 
+/// Converts "CAUCASIAN", "caucasian", or "Caucasian" → "Caucasian"
+fn to_title_case(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None    => String::new(),
+        Some(f) => f.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+    }
+}
+
 /// ThePornDB API client
 pub struct TpdbClient {
     client: reqwest::Client,
@@ -160,6 +169,70 @@ impl TpdbClient {
         performer
     }
 
+    /// Attribute-based search — all params are optional, combined server-side.
+    pub async fn search_by_attributes(
+        &self,
+        ethnicity:   Option<&str>,
+        hair_colour: Option<&str>,
+        eye_colour:  Option<&str>,
+        cup:         Option<&str>,
+        age_min:     Option<u32>,
+        age_max:     Option<u32>,
+        gender_filter: &GenderFilter,
+        fetch: usize,
+    ) -> Result<Vec<Performer>> {
+        let mut url = format!("{}/performers?per_page={}", TPDB_API_BASE, fetch);
+
+        if let Some(g) = gender_filter.tpdb_value() {
+            url.push_str(&format!("&gender={}", g));
+        }
+        if let Some(e) = ethnicity {
+            url.push_str(&format!("&ethnicity={}", urlencoding::encode(&to_title_case(e))));
+        }
+        if let Some(h) = hair_colour {
+            url.push_str(&format!("&hair_colour={}", urlencoding::encode(&to_title_case(h))));
+        }
+        if let Some(e) = eye_colour {
+            url.push_str(&format!("&eye_colour={}", urlencoding::encode(&to_title_case(e))));
+        }
+        if let Some(c) = cup {
+            // Cup takes just the letter(s) in uppercase: "B", "D", "DD", "DDD"
+            let cup_letter = c.trim_start_matches(|ch: char| ch.is_ascii_digit()).to_uppercase();
+            url.push_str(&format!("&cup={}", urlencoding::encode(&cup_letter)));
+        }
+        if let Some(a) = age_min {
+            url.push_str(&format!("&age={}&age_operation=%3E%3D", a));
+        }
+
+        log::info!("Attribute search: {}", url);
+
+        let resp = self.client.get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send().await
+            .context("Failed to query TPDB")?;
+
+        if !resp.status().is_success() {
+            anyhow::bail!("TPDB returned {}", resp.status());
+        }
+
+        let result: TpdbSearchResponse = resp.json().await
+            .context("Failed to parse TPDB response")?;
+
+        let mut performers: Vec<Performer> = result.data.into_iter()
+            .filter(|p| gender_filter.matches(
+                p.gender.as_deref().or(p.extras.gender.as_deref())
+            ))
+            .map(|p| self.convert_to_performer(p))
+            .collect();
+
+        // Filter age_max client-side (API only supports one age comparison)
+        if let Some(max) = age_max {
+            performers.retain(|p| p.age.map_or(true, |a| a <= max));
+        }
+
+        Ok(performers)
+    }
+
     /// Find performers similar to a single performer by their TPDB UUID.
     pub async fn similar_to(&self, tpdb_uuid: &str, gender_filter: &GenderFilter) -> Result<Vec<Performer>> {
         let url = format!("{}/performers/{}/similar", TPDB_API_BASE, tpdb_uuid);
@@ -230,10 +303,11 @@ impl TpdbClient {
             url.push_str(&format!("&gender={}", g));
         }
         if let Some(eth) = ethnicity {
-            url.push_str(&format!("&ethnicity={}", urlencoding::encode(&eth.to_uppercase())));
+            url.push_str(&format!("&ethnicity={}", urlencoding::encode(&to_title_case(eth))));
         }
         if let Some(cup) = top_cup {
-            url.push_str(&format!("&cup={}", urlencoding::encode(cup)));
+            let cup_letter = cup.trim_start_matches(|c: char| c.is_ascii_digit()).to_uppercase();
+            url.push_str(&format!("&cup={}", urlencoding::encode(&cup_letter)));
         }
 
         log::info!("Fallback search: {}", url);
