@@ -215,7 +215,7 @@ enum Commands {
         #[arg(long, default_value_t = 40)]
         limit: usize,
     },
-    /// Search your local face corpus for performers who look like someone
+    /// Search for performers who look like someone (by face)
     FaceSearch {
         /// A performer in your library to match faces against
         name: String,
@@ -224,6 +224,10 @@ enum Commands {
         /// Render a thumbnail image inline for each result
         #[arg(long, default_value_t = false)]
         images: bool,
+        /// Fetch a fresh candidate pool from StashDB (by the reference's
+        /// attributes) and embed it before searching. Requires a StashDB key.
+        #[arg(long)]
+        source: Option<String>,
     },
     /// View or change settings
     Config {
@@ -338,8 +342,9 @@ async fn main() -> anyhow::Result<()> {
             name,
             limit,
             images,
+            source,
         } => {
-            face_search(&db, &name, limit, images).await?;
+            face_search(&db, &name, limit, images, source).await?;
         }
         Commands::Config { key, value } => {
             configure(key, value)?;
@@ -1601,7 +1606,13 @@ async fn warm(db: &Database, limit: usize) -> anyhow::Result<()> {
 }
 
 /// Search the local face corpus for performers who look like a reference.
-async fn face_search(db: &Database, name: &str, limit: usize, images: bool) -> anyhow::Result<()> {
+async fn face_search(
+    db: &Database,
+    name: &str,
+    limit: usize,
+    images: bool,
+    source: Option<String>,
+) -> anyhow::Result<()> {
     let cfg = config::Config::load();
     let reference = db
         .get_performer(name)?
@@ -1613,11 +1624,66 @@ async fn face_search(db: &Database, name: &str, limit: usize, images: bool) -> a
         )
     })?;
 
+    // Optionally pull a fresh candidate pool from StashDB (matching the
+    // reference's attributes), embed it, and fold it into the corpus first.
+    if source.as_deref() == Some("stashdb") {
+        let key = cfg
+            .stashdb_key
+            .clone()
+            .filter(|k| !k.is_empty())
+            .context("No StashDB key. Set one with 'luminary config stashdb-key <key>'.")?;
+        let client = StashdbClient::new(key);
+        let gender = cfg.gender_filter.tpdb_value(); // "Female" etc.
+        println!(
+            "{}",
+            format!(
+                "Fetching StashDB candidates like {} ({}, {}, {})...",
+                reference.name,
+                gender.unwrap_or("any"),
+                reference.ethnicity.as_deref().unwrap_or("?"),
+                reference.hair_color.as_deref().unwrap_or("?"),
+            )
+            .bright_cyan()
+        );
+        let pool = client
+            .query_similar(
+                gender,
+                reference.ethnicity.as_deref(),
+                reference.hair_color.as_deref(),
+                30,
+            )
+            .await?;
+
+        let mut embedded = 0usize;
+        for p in pool {
+            if p.name.to_lowercase() == reference.name.to_lowercase() {
+                continue;
+            }
+            if db.get_embedding_any(&p.name)?.is_some() {
+                continue; // already in corpus
+            }
+            if let Some(url) = p.profile_image_url.as_deref().or(p.face_url.as_deref()) {
+                if let Ok(e) = embedder::generate_embedding(url) {
+                    db.save_candidate(&p, &e)?;
+                    embedded += 1;
+                    print!("{}", "·".bright_green());
+                    std::io::Write::flush(&mut std::io::stdout()).ok();
+                }
+            }
+        }
+        println!();
+        println!(
+            "{}",
+            format!("  +{} new StashDB faces", embedded).bright_black()
+        );
+        println!();
+    }
+
     let corpus = db.load_candidates()?;
     if corpus.is_empty() {
         println!(
             "{}",
-            "Face corpus is empty. Run 'luminary warm' to populate it.".yellow()
+            "Face corpus is empty. Run 'luminary warm' or pass --source stashdb.".yellow()
         );
         return Ok(());
     }
