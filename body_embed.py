@@ -97,16 +97,23 @@ def is_upright(lm):
 
 
 def classify_view(lm):
-    """Pose-determinable view: 'side' (profile — the shoulders collapse in x) vs
-    'frontal' (facing the camera-axis, front *or* rear).
+    """The view, from the shoulders' SIGNED x-spread. MediaPipe labels anatomical
+    left/right, so left-minus-right shoulder x:
+      - collapses toward 0 in a profile             -> 'side'
+      - is positive facing the camera (the left shoulder sits on the viewer's
+        right)                                       -> 'front'
+      - flips negative when the subject faces away   -> 'rear'
 
-    Front-vs-rear is deliberately NOT decided here: MediaPipe reports face-landmark
-    visibility as high even when the face is turned away, so pose can't tell them
-    apart. The ingest splits 'frontal' into front/rear using its face pass — a
-    detected face means front, its absence (on a full body) means rear.
+    Validated on labeled frames (front +0.17..+0.22, rear -0.18..-0.38, side
+    |dx|<0.08). This supersedes the old face-presence split, which mislabels an
+    over-the-shoulder rear shot as 'front' because the turned-back face is still
+    detected — the shoulder orientation gets it right. Same threshold (0.08) that
+    detects side now also gives front/rear by its sign.
     """
-    sw = abs(lm[11].x - lm[12].x)  # shoulder breadth (normalised)
-    return "side" if sw < 0.08 else "frontal"
+    dx = lm[11].x - lm[12].x  # left shoulder minus right (normalised)
+    if abs(dx) < 0.08:
+        return "side"
+    return "front" if dx > 0 else "rear"
 
 
 def build_vector(lm):
@@ -344,6 +351,10 @@ def debug_entry(url, lm, mask):
         "pose_detected": True,
         "view": classify_view(lm),
         "shoulder_width_norm": round(sw, 4),
+        # Orientation cue: MediaPipe labels anatomical L/R, so left-minus-right
+        # x flips sign with facing — expected >0 front, <0 rear.
+        "shoulder_dx": round(lm[11].x - lm[12].x, 4),
+        "hip_dx": round(lm[23].x - lm[24].x, 4),
         "is_full_body": is_full_body(lm),
         "is_upright": is_upright(lm),
         "visibility": vis,

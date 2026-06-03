@@ -81,22 +81,20 @@ impl ImageSource for ManualSource {
     }
 }
 
-/// Resolves an image's view from the pose classifier's coarse output and whether
-/// a face was detected.
-///
-/// THE rule (see `body_embed.py::classify_view`): pose alone can only tell
-/// `side` from `frontal`; front-vs-rear comes from the *face*. MediaPipe reports
-/// face-landmark visibility as high even when the subject is turned away, so a
-/// "frontal" body *with* a detected face is a front shot, one *without* is a rear
-/// shot. With no usable pose, a detected face is still a frontal head/torso crop;
-/// nothing at all is genuinely `unknown`.
+/// Resolves an image's view. The body sidecar (`body_embed.py::classify_view`)
+/// now decides `front`/`rear`/`side` directly from the shoulders' signed x-spread
+/// — MediaPipe's anatomical left/right flips sign with facing, which stays
+/// correct even for an over-the-shoulder rear shot that a face-presence test
+/// would wrongly call "front". So we trust the sidecar's view; `has_face` is only
+/// the tie-breaker when no pose was detected at all (a face ⇒ a frontal crop,
+/// otherwise `unknown`).
 pub fn classify_view(pose_view: Option<&str>, has_face: bool) -> &'static str {
-    match (pose_view, has_face) {
-        (Some("side"), _) => "side",
-        (Some("frontal"), true) => "front",
-        (Some("frontal"), false) => "rear",
-        (_, true) => "front",
-        (_, false) => "unknown",
+    match pose_view {
+        Some("front") => "front",
+        Some("rear") => "rear",
+        Some("side") => "side",
+        _ if has_face => "front",
+        _ => "unknown",
     }
 }
 
@@ -124,14 +122,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn view_front_rear_comes_from_face_not_pose() {
-        // A frontal-axis body splits on the face: present => front, absent => rear.
-        assert_eq!(classify_view(Some("frontal"), true), "front");
-        assert_eq!(classify_view(Some("frontal"), false), "rear");
-        // Side is side regardless of whether a (turned) face was seen.
+    fn view_trusts_sidecar_orientation_with_face_fallback() {
+        // The sidecar resolves front/rear/side from shoulder orientation; trust it
+        // regardless of face — an over-the-shoulder rear has a face yet is rear.
+        assert_eq!(classify_view(Some("front"), false), "front");
+        assert_eq!(classify_view(Some("rear"), true), "rear");
         assert_eq!(classify_view(Some("side"), true), "side");
-        assert_eq!(classify_view(Some("side"), false), "side");
-        // No pose: a face is a frontal crop; nothing at all is unknown.
+        // No pose at all: a face is a frontal crop; nothing is unknown.
         assert_eq!(classify_view(None, true), "front");
         assert_eq!(classify_view(None, false), "unknown");
     }
