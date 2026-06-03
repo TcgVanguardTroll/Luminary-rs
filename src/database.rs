@@ -354,13 +354,31 @@ impl Database {
         let has_meas = |p: &Performer| p.measurements.as_deref().is_some_and(|m| !m.is_empty());
         let cand = load("SELECT data FROM candidates WHERE name = ?1");
         let idx = load("SELECT data FROM body_index WHERE name = ?1");
-        if cand.as_ref().is_some_and(&has_meas) {
-            return Ok(cand);
+        // Primary record: prefer the one carrying measurements (candidates first,
+        // then the index); else whichever exists.
+        let mut primary = if cand.as_ref().is_some_and(&has_meas) {
+            cand.clone()
+        } else if idx.as_ref().is_some_and(&has_meas) {
+            idx.clone()
+        } else {
+            cand.clone().or_else(|| idx.clone())
+        };
+        // Enrich missing stature/mass from the other source. height/weight are
+        // backfilled into body_index only (StashDB has no weight; the bulk loader
+        // skipped height), so without this a re-`aggregate` — which rebuilds the
+        // index row from this record — would drop them whenever the candidates
+        // copy (which lacks them) wins as primary.
+        if let Some(p) = primary.as_mut() {
+            for src in [&cand, &idx].into_iter().flatten() {
+                if p.height.is_none() {
+                    p.height = src.height.clone();
+                }
+                if p.weight.is_none() {
+                    p.weight = src.weight.clone();
+                }
+            }
         }
-        if idx.as_ref().is_some_and(&has_meas) {
-            return Ok(idx);
-        }
-        Ok(cand.or(idx))
+        Ok(primary)
     }
 
     /// Gets all performers
@@ -552,6 +570,27 @@ mod tests {
         let got = db.get_known_performer("Roster Star").unwrap().unwrap();
         assert_eq!(got.measurements.as_deref(), Some("34D-26-38"));
         assert!(db.get_known_performer("Nobody").unwrap().is_none());
+    }
+
+    #[test]
+    fn known_performer_enriches_height_weight_from_index() {
+        let db = Database::new(":memory:").unwrap();
+        // body_index carries the backfilled stature/mass; candidates is the
+        // measurements-bearing primary but lacks height/weight. A re-aggregate
+        // must keep the stature/mass rather than drop it.
+        let mut idx = Performer::new("Backfilled Star".to_string());
+        idx.height = Some("168cm".to_string());
+        idx.weight = Some("60kg".to_string());
+        db.save_body_index(&idx, Some(&[1.0]), None, None, 1)
+            .unwrap();
+        let mut cand = Performer::new("Backfilled Star".to_string());
+        cand.measurements = Some("34D-26-38".to_string());
+        db.save_candidate(&cand, &[0.1, 0.2]).unwrap();
+
+        let got = db.get_known_performer("Backfilled Star").unwrap().unwrap();
+        assert_eq!(got.measurements.as_deref(), Some("34D-26-38")); // from candidates
+        assert_eq!(got.height.as_deref(), Some("168cm")); // enriched from index
+        assert_eq!(got.weight.as_deref(), Some("60kg"));
     }
 
     fn img(url: &str, view: &str, face: Option<Vec<f32>>) -> ImageRow {
