@@ -249,6 +249,13 @@ async fn main() -> anyhow::Result<()> {
         } => {
             face_search(&db, &name, limit, images, source).await?;
         }
+        Commands::Query {
+            text,
+            images,
+            limit,
+        } => {
+            nl_query(&db, &text.join(" "), images, limit).await?;
+        }
         Commands::Config { key, value } => {
             configure(key, value)?;
         }

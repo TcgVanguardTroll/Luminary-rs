@@ -247,3 +247,67 @@ pub(crate) async fn body_search(
     );
     Ok(())
 }
+
+/// Plain-English search: parse a free-text query into `find`'s structured inputs
+/// (see `luminary::query`) and run it. The interpretation is echoed so the user
+/// can see how their sentence was read.
+pub(crate) async fn nl_query(
+    db: &Database,
+    text: &str,
+    images: bool,
+    limit: usize,
+) -> anyhow::Result<()> {
+    let q = luminary::query::parse(text);
+
+    let mut bits: Vec<String> = Vec::new();
+    if !q.looks_like.is_empty() {
+        bits.push(format!("face like {}", q.looks_like.join(" + ")));
+    }
+    if !q.body_like.is_empty() {
+        bits.push(format!("body like {}", q.body_like.join(" + ")));
+    }
+    if let Some(e) = &q.eye {
+        bits.push(format!("eyes {}", e));
+    }
+    if let Some(h) = &q.hair {
+        bits.push(format!("hair {}", h));
+    }
+    if let Some(et) = &q.ethnicity {
+        bits.push(format!("ethnicity {}", et));
+    }
+    if bits.is_empty() {
+        anyhow::bail!(
+            "Couldn't read any filters from that. Try e.g. 'blue-eyed blondes that \
+             look like <name>' or '<attrs> with a butt like <name>'."
+        );
+    }
+    println!(
+        "{} {}",
+        "Interpreted as:".bright_black(),
+        bits.join(" · ").bright_white()
+    );
+    println!();
+
+    find(
+        db,
+        None,
+        None,
+        q.looks_like,
+        q.body_like,
+        q.hair,
+        q.eye,
+        q.ethnicity,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        images,
+        None,
+        None,
+        limit,
+    )
+    .await
+}

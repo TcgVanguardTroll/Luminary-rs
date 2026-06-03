@@ -18,6 +18,7 @@ pub mod image_cache;
 pub mod models;
 pub mod pichunter;
 pub mod pornpics;
+pub mod query;
 pub mod recommender;
 pub mod region;
 pub mod scraper;

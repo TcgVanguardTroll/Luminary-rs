@@ -250,6 +250,19 @@ pub(crate) enum Commands {
         #[arg(long)]
         source: Option<String>,
     },
+    /// Plain-English search — translates a sentence into `find`'s filters, e.g.
+    ///   luminary query blue-eyed blondes that look like Naughty Alysha
+    ///   luminary query blondes with a butt like Dee Siren
+    Query {
+        /// The query text (no quotes needed)
+        #[arg(required = true)]
+        text: Vec<String>,
+        /// Render a thumbnail image inline for each result
+        #[arg(long, default_value_t = false)]
+        images: bool,
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+    },
     /// View or change settings
     Config {
         /// Setting to change (e.g. gender)
