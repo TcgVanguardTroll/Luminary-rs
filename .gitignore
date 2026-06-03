@@ -2,3 +2,7 @@
 
 # Machine-local build config (absolute target-dir + linker paths)
 /.cargo/config.toml
+
+# Python sidecar bytecode cache
+__pycache__/
+*.pyc
