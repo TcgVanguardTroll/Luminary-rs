@@ -1,4 +1,4 @@
-//! Multi-modal fusion for the `body-search --by blend` lens.
+//! Multi-modal fusion for the `body-search` `overall` lens (the default).
 //!
 //! Each search modality (face, build/pose, volume/seg, posterior projection,
 //! recorded measurements) scores on its own scale — a face cosine reads ~55–75%

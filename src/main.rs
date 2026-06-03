@@ -312,11 +312,11 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         images: bool,
         /// Which lens to match by:
-        ///   build        = skeletal proportions (shoulder/hip/leg), from pose
-        ///   volume       = silhouette fullness (butt/thigh), from segmentation
-        ///   measurements = recorded WHR/hips/cup (no images; works for niche refs)
-        ///   blend        = rank-normalised fusion of face + build + volume + projection + measurements
-        #[arg(long = "by", default_value = "build", value_parser = ["build", "volume", "measurements", "blend"])]
+        ///   overall = multi-modal fusion of face + frame + curves + projection + stats (default)
+        ///   frame   = skeletal proportions (shoulder/hip/leg), from pose
+        ///   curves  = silhouette fullness (butt/thigh), from segmentation
+        ///   stats   = recorded WHR/hips/cup (no images; works for niche refs)
+        #[arg(long = "by", default_value = "overall", value_parser = ["overall", "frame", "curves", "stats"])]
         by: String,
     },
     /// Search for performers who look like someone (by face)

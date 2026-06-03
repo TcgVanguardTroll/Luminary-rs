@@ -1,5 +1,5 @@
 //! Image-based search handlers: `find` (attributes + face), `body-search`
-//! (`--by build`/`volume`/`measurements`), and `face-search`.
+//! (`--by overall`/`frame`/`curves`/`stats`), and `face-search`.
 use super::*;
 pub(crate) async fn find(
     db: &Database,
@@ -454,11 +454,13 @@ pub(crate) async fn find(
 /// Find performers with a similar body, ranked against the cached index.
 ///
 /// `by` selects the lens:
-///   - `build` (default): skeletal pose vector (shoulder/hip/leg proportions).
-///   - `volume`: silhouette/segmentation vector (waist/hip/thigh fullness — the
+///   - `overall` (default): multi-modal blend of every available signal
+///     (handled by `search_blend`).
+///   - `frame`: skeletal pose vector (shoulder/hip/leg proportions).
+///   - `curves`: silhouette/segmentation vector (waist/hip/thigh fullness — the
 ///     butt & thigh shape the skeleton can't see). Built from a combined,
 ///     gated pool (pornpics + TPDB scenes + StashDB).
-///   - `measurements`: recorded WHR/hips/cup (handled by `search_by_measure`).
+///   - `stats`: recorded WHR/hips/cup (handled by `search_by_measure`).
 pub(crate) async fn body_search(
     db: &Database,
     name: &str,
@@ -473,17 +475,17 @@ pub(crate) async fn body_search(
     // Measurements lens: rank the cached index by recorded build (WHR/hips/cup/…).
     // Needs no reference *images*, so it works even for niche performers who have
     // no clean full-body photo (where the visual lenses can't build a vector).
-    if by == "measurements" {
+    if by == "stats" {
         return search_by_measure(db, &reference, limit, images).await;
     }
-    // Multi-modal blend: fuse face + build + volume + projection + measurements.
-    if by == "blend" {
+    // The default: multi-modal blend of face + frame + curves + projection + stats.
+    if by == "overall" {
         return search_blend(db, &reference, limit, images).await;
     }
-    // `volume` = silhouette/segmentation lens; otherwise the default `build`
-    // (skeletal pose) lens. Noun reused throughout the output.
-    let volume = by == "volume";
-    let kind = if volume { "volume" } else { "build" };
+    // `curves` = silhouette/segmentation lens; otherwise the `frame` (skeletal
+    // pose) lens. The label is reused throughout the output.
+    let volume = by == "curves";
+    let kind = if volume { "curves" } else { "frame" };
     let key = cfg.stashdb_key.clone().filter(|k| !k.is_empty()).context(
         "body-search needs full-body images from StashDB. Set 'luminary config stashdb-key <key>'.",
     )?;
@@ -945,8 +947,8 @@ async fn search_by_measure(
     Ok(())
 }
 
-/// The multi-modal `blend` lens: fuse face + build + volume + projection +
-/// measurements into one rank. The reference's modalities are read entirely from
+/// The `overall` lens: fuse face + frame + curves + projection + stats into one
+/// rank (the default for body-search). The reference's modalities are read from
 /// local data — its face embedding, its ingested image corpus (aggregated the
 /// same way `aggregate` builds the index), and its recorded measurements — so the
 /// blend needs no fresh gathering. Candidates are the cached body index, and each
@@ -989,10 +991,10 @@ async fn search_blend(
     println!(
         "  {}  {}  {}  {}  {}",
         active("face", ref_face.is_some()),
-        active("build", ref_pose.is_some()),
-        active("volume", ref_seg.is_some()),
+        active("frame", ref_pose.is_some()),
+        active("curves", ref_seg.is_some()),
         active("proj", ref_proj.is_some()),
-        active("measurements", ref_meas.is_some()),
+        active("stats", ref_meas.is_some()),
     );
     if ref_face.is_none()
         && ref_pose.is_none()
@@ -1011,8 +1013,8 @@ async fn search_blend(
         println!(
             "{}",
             format!(
-                "  (no ingested body images — blending face + measurements only; \
-                 run 'luminary ingest {}' to add build/volume/projection)",
+                "  (no ingested body images — blending face + stats only; \
+                 run 'luminary ingest {}' to add frame/curves/projection)",
                 reference.name
             )
             .bright_black()
@@ -1110,10 +1112,10 @@ async fn search_blend(
         let mut tags = String::new();
         for (label, v) in [
             ("face", m.face),
-            ("build", m.build),
-            ("vol", m.volume),
+            ("frame", m.build),
+            ("curves", m.volume),
             ("proj", m.proj),
-            ("meas", m.meas),
+            ("stats", m.meas),
         ] {
             if let Some(v) = v {
                 tags.push_str(&format!("  {} {:.0}%", label, v));
