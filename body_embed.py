@@ -261,16 +261,22 @@ def build_proj_vector(lm, mask):
     profile). Reads silhouette *depth* (the same central-run width_at, but in a
     profile that run spans front->back) at waist / glute / thigh height,
     normalised by torso *height* (shoulder->hip) — height stays meaningful in
-    profile, where shoulder *width* collapses. Gated to profile, standing,
-    full-body frames.
+    profile, where shoulder *width* collapses. Gated to a profile view with
+    reliable shoulders+hips and an upright torso: in a profile the far-side
+    knee/ankle are occluded (visibility <0.5), so full-body visibility is NOT
+    required — requiring it is why proj never fired on real side shots. Sample
+    heights are torso-relative (the legs are unreliable in profile).
 
     First cut: the depth ratios capture relative lower-body projection, but the
     exact landmark heights and divisors want empirical tuning against real
     profile images. Returns None when the silhouette is unusable.
     """
-    if mask is None or not is_full_body(lm) or not is_upright(lm):
+    if mask is None:
         return None
-    # Require a profile view; otherwise depth and width aren't separable here.
+    # Shoulders + hips must be reliable; the far-side legs are occluded in profile.
+    if _min_visibility(lm, (11, 12, 23, 24)) < MIN_VISIBILITY:
+        return None
+    # Profile only — shoulders collapse in x (same threshold as classify_view).
     if abs(lm[11].x - lm[12].x) >= 0.08:
         return None
 
@@ -281,15 +287,14 @@ def build_proj_vector(lm, mask):
 
     sh_y = (lm[11].y + lm[12].y) / 2
     hip_y = (lm[23].y + lm[24].y) / 2
-    knee_y = (lm[25].y + lm[26].y) / 2
-    torso = abs(hip_y - sh_y)
-    if torso < 1e-4:
+    torso = hip_y - sh_y
+    if torso < 1e-4:  # shoulders above hips (upright torso)
         return None
     mid_col = int(((lm[23].x + lm[24].x) / 2) * w)  # hip centerline column
 
-    waist_y = sh_y + 0.65 * (hip_y - sh_y)     # just above the hips
-    glute_y = hip_y + 0.15 * (knee_y - hip_y)  # just below the hip joint
-    thigh_y = hip_y + 0.45 * (knee_y - hip_y)  # upper thigh
+    waist_y = sh_y + 0.65 * torso   # just above the hips
+    glute_y = hip_y + 0.20 * torso  # just below the hip joint (torso-relative)
+    thigh_y = hip_y + 0.55 * torso  # upper thigh
 
     waist_d = width_at(mask, waist_y, mid_col)  # in profile, this run = depth
     glute_d = width_at(mask, glute_y, mid_col)
