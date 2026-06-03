@@ -215,8 +215,20 @@ async fn main() -> anyhow::Result<()> {
             urls,
             id_threshold,
             force,
+            roster,
+            allow_unverified,
         } => {
-            ingest(&db, names, images, urls, id_threshold, force).await?;
+            ingest(
+                &db,
+                names,
+                images,
+                urls,
+                id_threshold,
+                force,
+                roster,
+                allow_unverified,
+            )
+            .await?;
         }
         Commands::Aggregate { names } => {
             aggregate(&db, names)?;

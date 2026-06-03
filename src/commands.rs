@@ -188,8 +188,7 @@ pub(crate) enum Commands {
     /// pose/seg/face vectors. The foundation the view-aware body index is built
     /// from. Incremental and resumable.
     Ingest {
-        /// Performer(s) to ingest images for
-        #[arg(required = true)]
+        /// Performer(s) to ingest images for (omit when using --roster)
         names: Vec<String>,
         /// Max images to gather per source
         #[arg(long, default_value_t = 24)]
@@ -204,6 +203,13 @@ pub(crate) enum Commands {
         /// Re-embed images already in the corpus
         #[arg(long, default_value_t = false)]
         force: bool,
+        /// Ingest every performer in the cached body index (the full roster)
+        #[arg(long, default_value_t = false)]
+        roster: bool,
+        /// Ingest without a seed face to verify identity (unsafe at scale —
+        /// bypasses the bogus-name guard)
+        #[arg(long, default_value_t = false)]
+        allow_unverified: bool,
     },
     /// Rebuild the cached body index from the per-image corpus that `ingest`
     /// fills — quality-weighted and view-aware (only frontal frames feed the

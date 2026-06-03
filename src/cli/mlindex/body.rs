@@ -157,7 +157,11 @@ async fn resolve_seed_face(db: &Database, name: &str) -> Option<Vec<f32>> {
     if let Ok(Some(e)) = db.get_embedding_any(name) {
         return Some(e);
     }
-    let p = db.get_performer(name).ok().flatten()?;
+    let p = db
+        .get_performer(name)
+        .ok()
+        .flatten()
+        .or_else(|| db.get_known_performer(name).ok().flatten())?;
     let cfg = config::Config::load();
     let stash = cfg
         .stashdb_key
@@ -184,10 +188,26 @@ pub(crate) async fn ingest(
     manual_urls: Vec<String>,
     id_threshold: f32,
     force: bool,
+    roster: bool,
+    allow_unverified: bool,
 ) -> anyhow::Result<()> {
     use luminary::database::ImageRow;
     use luminary::source::{classify_view, quality_score, ImageSource, ManualSource};
     use std::collections::{BTreeMap, HashSet};
+
+    // Min seed-matching faces to trust a gather. Below this the sources likely
+    // returned the wrong/missing person (a bogus name) → skip the whole batch.
+    const MIN_ID_MATCHES: usize = 2;
+
+    // --roster ingests every performer in the cached body index (resumable).
+    let names = if roster {
+        db.load_body_index()?
+            .into_iter()
+            .map(|e| e.performer.name)
+            .collect()
+    } else {
+        names
+    };
 
     // The sanctioned image sources. pornpics + pichunter performer pages are
     // single-performer, so a face-less rear shot can be gallery-trusted. Manual
@@ -220,6 +240,14 @@ pub(crate) async fn ingest(
 
         let seed = resolve_seed_face(db, &performer).await;
         if seed.is_none() {
+            if !allow_unverified {
+                println!(
+                    "  {} {} — no seed face; skipping (--allow-unverified to override)",
+                    "–".bright_black(),
+                    performer.bright_black()
+                );
+                continue;
+            }
             println!(
                 "  {} no seed face for {} — identity unverified (gallery-trusted)",
                 "!".yellow(),
@@ -257,6 +285,28 @@ pub(crate) async fn ingest(
         let urls: Vec<String> = targets.iter().map(|(u, _)| u.clone()).collect();
         let faces = embedder::generate_embeddings(&urls).unwrap_or_default();
         let bodies = embedder::generate_body_views(&urls).unwrap_or_default();
+
+        // Bogus-name guard: with a seed, require enough gathered faces to match
+        // it. A wrong/missing gallery matches few or none — skip the whole batch
+        // rather than store another performer's (or generic) images under this
+        // name. Per-image co-star rejection still happens in the loop below.
+        if let Some(s) = &seed {
+            let matched = faces
+                .iter()
+                .flatten()
+                .filter(|f| embedder::cosine_similarity(f, s) >= id_threshold)
+                .count();
+            if matched < MIN_ID_MATCHES {
+                println!(
+                    "  {} {} — {} seed-matching face(s) (< {}); likely wrong/missing gallery, skipping",
+                    "–".bright_black(),
+                    performer.bright_black(),
+                    matched,
+                    MIN_ID_MATCHES
+                );
+                continue;
+            }
+        }
 
         let mut kept = 0usize;
         let mut rejected = 0usize;
