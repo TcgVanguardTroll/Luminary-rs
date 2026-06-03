@@ -28,6 +28,7 @@ pub(crate) use luminary::scraper::Scraper;
 pub(crate) use luminary::stashdb::StashdbClient;
 pub(crate) use luminary::tpdb::TpdbClient;
 
+pub mod eval;
 pub mod library;
 pub mod mlindex;
 pub mod profile;

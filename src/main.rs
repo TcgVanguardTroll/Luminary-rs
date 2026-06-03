@@ -19,6 +19,7 @@ use luminary::{config, models, recommender};
 
 mod cli;
 mod commands;
+use cli::eval::*;
 use cli::library::*;
 use cli::mlindex::*;
 use cli::profile::*;
@@ -255,6 +256,9 @@ async fn main() -> anyhow::Result<()> {
             limit,
         } => {
             nl_query(&db, &text.join(" "), images, limit).await?;
+        }
+        Commands::Eval => {
+            eval_quality(&db)?;
         }
         Commands::Config { key, value } => {
             configure(key, value)?;

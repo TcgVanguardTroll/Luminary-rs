@@ -14,6 +14,7 @@ pub mod blend;
 pub mod config;
 pub mod database;
 pub mod embedder;
+pub mod eval;
 pub mod image_cache;
 pub mod models;
 pub mod pichunter;

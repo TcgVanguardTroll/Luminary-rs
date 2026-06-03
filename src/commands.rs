@@ -263,6 +263,10 @@ pub(crate) enum Commands {
         #[arg(long, default_value_t = 10)]
         limit: usize,
     },
+    /// Evaluate ranking quality of the `overall` blend against your liked set
+    /// (leave-one-out): mean precision@k / recall@k / MAP / nDCG@k. Local, no
+    /// network — a number to tune the blend/proj/bust against.
+    Eval,
     /// View or change settings
     Config {
         /// Setting to change (e.g. gender)
