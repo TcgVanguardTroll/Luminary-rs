@@ -46,9 +46,17 @@ impl Default for Weights {
 /// Blends each candidate's per-modality scores into one 0–100 score that is
 /// robust to the modalities living on different scales. Each modality is
 /// rank-normalised to a 0–1 percentile within the candidates that have it, then
-/// combined as a weighted average over only the modalities a candidate actually
-/// carries (so a missing modality neither helps nor hurts beyond dropping its
-/// weight). Returns one score per input candidate, in input order.
+/// combined as a weighted percentile sum.
+///
+/// Coverage is rewarded: rather than renormalising by each candidate's own
+/// present weight (which gives a lone modality full credit and lets a
+/// measurements-only guess outrank a build+volume+measurements match), the
+/// weighted sum is divided by the BEST present-weight in the pool. So a
+/// candidate missing modalities is scored down relative to the best-covered one,
+/// while structurally-absent modalities — ones *no* candidate has, e.g.
+/// projection before any side shots are ingested — penalise nobody, since the
+/// pool maximum never includes them. A perfectly-matched, best-covered candidate
+/// still reaches ~100. Returns one score per input candidate, in input order.
 pub fn blend_scores(cands: &[ModalityScores], w: &Weights) -> Vec<f64> {
     let face = percentiles(&cands.iter().map(|c| c.face).collect::<Vec<_>>());
     let build = percentiles(&cands.iter().map(|c| c.build).collect::<Vec<_>>());
@@ -56,7 +64,8 @@ pub fn blend_scores(cands: &[ModalityScores], w: &Weights) -> Vec<f64> {
     let proj = percentiles(&cands.iter().map(|c| c.proj).collect::<Vec<_>>());
     let meas = percentiles(&cands.iter().map(|c| c.meas).collect::<Vec<_>>());
 
-    (0..cands.len())
+    // Per candidate: the weighted percentile sum, and the total weight it covers.
+    let scored: Vec<(f64, f64)> = (0..cands.len())
         .map(|i| {
             let parts = [
                 (face[i], w.face),
@@ -66,19 +75,26 @@ pub fn blend_scores(cands: &[ModalityScores], w: &Weights) -> Vec<f64> {
                 (meas[i], w.meas),
             ];
             let mut num = 0.0;
-            let mut den = 0.0;
+            let mut covered = 0.0;
             for (p, weight) in parts {
                 if let Some(p) = p {
                     num += weight * p;
-                    den += weight;
+                    covered += weight;
                 }
             }
-            if den > 0.0 {
-                100.0 * num / den
-            } else {
-                0.0
-            }
+            (num, covered)
         })
+        .collect();
+
+    // Divide by the best coverage in the pool, not each candidate's own — so
+    // broader matches outrank single-modality ones.
+    let max_covered = scored.iter().map(|(_, c)| *c).fold(0.0_f64, f64::max);
+    if max_covered <= 0.0 {
+        return vec![0.0; cands.len()];
+    }
+    scored
+        .iter()
+        .map(|(num, _)| 100.0 * num / max_covered)
         .collect()
 }
 
@@ -143,14 +159,23 @@ mod tests {
     }
 
     #[test]
-    fn missing_modalities_drop_their_weight_without_penalty() {
-        // One candidate has only build, the other only measurements; each is the
-        // sole holder of its modality (percentile 1.0), so both blend to the same
-        // positive score rather than collapsing to zero from absent weights.
-        let cands = vec![ms(None, Some(95.0), None), ms(None, None, Some(60.0))];
+    fn coverage_is_rewarded() {
+        // A broader match outranks a single-modality one even when the latter
+        // tops its modality: build+meas beats a higher meas-only candidate.
+        let cands = vec![
+            ms(None, Some(80.0), Some(80.0)), // build + measurements
+            ms(None, None, Some(99.0)),       // measurements only, highest meas
+        ];
         let s = blend_scores(&cands, &Weights::default());
-        assert!((s[0] - s[1]).abs() < 1e-9);
-        assert!(s[0] > 0.0);
+        assert!(s[0] > s[1]);
+
+        // Between two single-modality candidates, the heavier-weighted modality
+        // (build 0.20 > meas 0.10) wins — neither gets full credit for a lone hit.
+        let solo = vec![ms(None, Some(95.0), None), ms(None, None, Some(95.0))];
+        let s2 = blend_scores(&solo, &Weights::default());
+        assert!(s2[0] > s2[1]);
+        // The best-covered candidate in a pool still reaches ~100.
+        assert!((s2[0] - 100.0).abs() < 1e-9);
     }
 
     #[test]
