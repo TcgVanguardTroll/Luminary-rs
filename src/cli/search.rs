@@ -91,8 +91,16 @@ pub(crate) async fn body_search(
             embedder::generate_body_embeddings(urls)
         }
     };
+    // Separate a sidecar *failure* (retryable — don't blame the images) from a
+    // genuine *no usable frame* result (the images really are headshots/crops).
     let ref_vecs: Vec<Vec<f32>> = embed(&ref_imgs)
-        .unwrap_or_default()
+        .with_context(|| {
+            format!(
+                "Body-embedding sidecar failed for {} (transient — model load or \
+                 image download). Re-run the search.",
+                reference.name
+            )
+        })?
         .into_iter()
         .flatten()
         .collect();

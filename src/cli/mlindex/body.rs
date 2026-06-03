@@ -172,7 +172,19 @@ async fn resolve_seed_face(db: &Database, name: &str) -> Option<Vec<f32>> {
     if urls.is_empty() {
         return None;
     }
-    embedder::generate_centroid_embedding(&urls).ok().flatten()
+    match embedder::generate_centroid_embedding(&urls) {
+        Ok(face) => face,
+        Err(e) => {
+            // A transient sidecar failure here silently disables identity-gating
+            // for this performer (ingest falls back to trusting the gallery), so
+            // surface it rather than treating it as a genuine "no clean face".
+            log::warn!(
+                "seed-face sidecar failed for {name} \
+                 (identity-gating disabled this run): {e:#}"
+            );
+            None
+        }
+    }
 }
 
 /// Build (or extend) the per-image corpus for specific performers. For each one
