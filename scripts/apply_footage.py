@@ -158,12 +158,13 @@ def process_frame(frame, pose, seg, face_app, seed):
     pose_vec = be.build_vector(lm)
     seg_vec = be.build_seg_vector(lm, mask) if mask is not None else None
     proj_vec = be.build_proj_vector(lm, mask) if mask is not None else None
-    if not (pose_vec or seg_vec or proj_vec):
+    bust_vec = be.build_bust_vector(lm, mask) if mask is not None else None
+    if not (pose_vec or seg_vec or proj_vec or bust_vec):
         return None, verdict, id_sim
     vis = be._min_visibility(lm, (11, 12, 23, 24))
     quality = round(float(min(1.0, max(0.0, vis))), 3)
     return {"view": be.classify_view(lm), "quality": quality,
-            "pose": pose_vec, "seg": seg_vec, "proj": proj_vec,
+            "pose": pose_vec, "seg": seg_vec, "proj": proj_vec, "bust": bust_vec,
             "face": verdict}, verdict, id_sim
 
 
@@ -279,7 +280,8 @@ def main():
                     "(performer,url,source,view,quality,pose_vec,seg_vec,face_vec,proj_vec,bust_vec) "
                     "VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (name, url, "footage", fr["view"], fr["quality"],
-                     blob(fr["pose"]), blob(fr["seg"]), None, blob(fr["proj"]), None))
+                     blob(fr["pose"]), blob(fr["seg"]), None, blob(fr["proj"]),
+                     blob(fr.get("bust"))))
                 seen.add(url)
                 kept += 1
                 views[fr["view"]] = views.get(fr["view"], 0) + 1

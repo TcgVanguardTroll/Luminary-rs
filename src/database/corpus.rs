@@ -72,9 +72,12 @@ pub fn aggregate_views(images: &[ImageRow]) -> AggregatedViews {
         .filter(|im| im.view == "side")
         .filter_map(|im| im.proj.clone().map(|p| (p, im.quality)))
         .collect();
+    // Bust is an anterior-*projection* (chest depth from a SIDE profile), the
+    // front-of-body analog of `proj` — so it aggregates from `side` frames, not
+    // frontal ones (see body_embed::build_bust_vector).
     let bust: Vec<(Vec<f32>, f32)> = images
         .iter()
-        .filter(|im| is_frontal(&im.view))
+        .filter(|im| im.view == "side")
         .filter_map(|im| im.bust.clone().map(|p| (p, im.quality)))
         .collect();
     let n = pose.len().max(seg.len()).max(proj.len()).max(bust.len());

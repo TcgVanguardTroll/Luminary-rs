@@ -310,6 +310,56 @@ def build_proj_vector(lm, mask):
     ]
 
 
+def build_bust_vector(lm, mask):
+    """Anterior-*projection* ratios from a SIDE/profile silhouette — how far the
+    CHEST/bust pushes forward, the front-of-body analog of build_proj_vector's
+    posterior (glute) projection. In a profile, breast fullness shows as silhouette
+    DEPTH at chest height that a frontal cup/width vector can't capture (two 34DD
+    performers can differ a lot in profile projection). Same profile gate + upright
+    torso + torso-relative sampling. Returns None when the silhouette is unusable.
+
+    First cut (#16): ratios capture relative bust projection; exact sample heights
+    and divisors want empirical tuning against real profile images.
+    """
+    if mask is None:
+        return None
+    # Shoulders + hips must be reliable; the far-side legs are occluded in profile.
+    if _min_visibility(lm, (11, 12, 23, 24)) < MIN_VISIBILITY:
+        return None
+    # Profile only — shoulders collapse in x (same threshold as classify_view).
+    if abs(lm[11].x - lm[12].x) >= 0.08:
+        return None
+
+    mask = np.asarray(mask)
+    if mask.ndim == 3:  # ImageSegmenter returns (H, W, 1)
+        mask = mask[:, :, 0]
+    _, w = mask.shape
+
+    sh_y = (lm[11].y + lm[12].y) / 2
+    hip_y = (lm[23].y + lm[24].y) / 2
+    torso = hip_y - sh_y
+    if torso < 1e-4:  # shoulders above hips (upright torso)
+        return None
+    mid_col = int(((lm[11].x + lm[12].x) / 2) * w)  # shoulder centerline column
+
+    bust_y = sh_y + 0.25 * torso   # bust apex (upper chest)
+    under_y = sh_y + 0.45 * torso  # underbust
+    waist_y = sh_y + 0.70 * torso  # waist (build context)
+
+    bust_d = width_at(mask, bust_y, mid_col)   # in profile, this run = depth
+    under_d = width_at(mask, under_y, mid_col)
+    waist_d = width_at(mask, waist_y, mid_col)
+    if min(bust_d, under_d, waist_d) < 1e-4:
+        return None
+
+    return [
+        bust_d / torso,    # bust-band depth, scale-free
+        bust_d / waist_d,  # projection past the waist line — the "bust" signal
+        bust_d / under_d,  # bust vs underbust (fullness / overhang)
+        under_d / torso,   # underbust depth (frame context)
+    ]
+
+
 def debug_entry(url, lm, mask):
     """Per-URL diagnostic for --debug: every gate decision and the raw values
     behind it, so a rejected frame can be diagnosed (and the gates/measures
