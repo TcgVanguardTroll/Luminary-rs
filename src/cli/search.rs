@@ -12,6 +12,28 @@ pub(crate) use find::find;
 use measure::search_by_measure;
 use overall::search_blend;
 
+/// Height-band gate for "same stature, not just proportions". Returns
+/// `Some((ref_cm, tol_cm))` when a tolerance is set AND the reference has a
+/// recorded height; otherwise `None` (no filtering).
+pub(super) fn height_band(reference: &models::Performer, tol: Option<f64>) -> Option<(f64, f64)> {
+    match (tol, crate::recommender::performer_height_cm(reference)) {
+        (Some(t), Some(h)) => Some((h, t)),
+        _ => None,
+    }
+}
+
+/// True when the candidate passes the height band (or no band is active). A
+/// candidate with no recorded height is excluded while a band is active — we
+/// can't confirm it shares the reference's stature.
+pub(super) fn in_band(band: Option<(f64, f64)>, p: &models::Performer) -> bool {
+    match band {
+        None => true,
+        Some((h, t)) => {
+            crate::recommender::performer_height_cm(p).map_or(false, |c| (c - h).abs() <= t)
+        }
+    }
+}
+
 /// Find performers with a similar body, ranked against the cached index.
 ///
 /// `by` selects the lens:
@@ -28,21 +50,39 @@ pub(crate) async fn body_search(
     limit: usize,
     images: bool,
     by: &str,
+    height_tol: Option<f64>,
 ) -> anyhow::Result<()> {
     let cfg = config::Config::load();
     let reference = db
         .get_performer(name)?
         .ok_or_else(|| anyhow::anyhow!("'{}' not found in your library. Add them first.", name))?;
+    let band = height_band(&reference, height_tol);
+    if height_tol.is_some() && band.is_none() {
+        println!(
+            "{}",
+            format!(
+                "  (--height-tol ignored: no recorded height for {})",
+                reference.name
+            )
+            .yellow()
+        );
+    }
+    if let Some((h, t)) = band {
+        println!(
+            "{}",
+            format!("  height band: {:.0}±{:.0}cm (stature-matched)", h, t).bright_black()
+        );
+    }
     // Measurements lens: rank the cached index by recorded build (WHR/hips/cup/…).
     // Needs no reference *images*, so it works even for niche performers who have
     // no clean full-body photo (where the visual lenses can't build a vector).
     if by == "stats" {
-        return search_by_measure(db, &reference, limit, images).await;
+        return search_by_measure(db, &reference, limit, images, band).await;
     }
     // The default: multi-modal blend of face + frame + curves + projection + stats.
     // `body` is the same blend with face excluded — pure body-type matching.
     if by == "overall" || by == "body" {
-        return search_blend(db, &reference, limit, images, by == "body").await;
+        return search_blend(db, &reference, limit, images, by == "body", band).await;
     }
     // `curves` = silhouette/segmentation lens; otherwise the `frame` (skeletal
     // pose) lens. The label is reused throughout the output.
@@ -140,7 +180,7 @@ pub(crate) async fn body_search(
             .into_iter()
             .filter(|e| {
                 let n = e.performer.name.to_lowercase();
-                n != ref_lc && !known.contains(&n)
+                n != ref_lc && !known.contains(&n) && in_band(band, &e.performer)
             })
             .filter_map(|e| {
                 let cv = if volume { e.seg } else { e.pose }?;

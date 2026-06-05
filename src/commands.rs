@@ -236,6 +236,12 @@ pub(crate) enum Commands {
         ///   stats   = recorded WHR/hips/cup (no images; works for niche refs)
         #[arg(long = "by", default_value = "overall", value_parser = ["overall", "body", "frame", "curves", "stats"])]
         by: String,
+        /// Only match performers within ± this many cm of the reference's height,
+        /// so results share the same *stature*, not just proportions. Without it,
+        /// a tall performer with the same proportions ranks as high as a short one
+        /// (the body vectors are scale-free). E.g. `--height-tol 8`.
+        #[arg(long = "height-tol")]
+        height_tol: Option<f64>,
     },
     /// Search for performers who look like someone (by face)
     FaceSearch {
