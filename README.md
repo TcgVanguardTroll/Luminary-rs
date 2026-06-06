@@ -19,7 +19,9 @@ All data — performer profiles, face embeddings, preferences — stays on your 
 - **Smart recommendations** — IDF-weighted scoring that emphasises what's *distinctive* about your taste, not just what's common; body type is a hard gate
 - **Taste clusters** — k-means over your library finds your *multiple* types; `recommend --by-cluster` surfaces matches for each
 - **Face similarity** — ArcFace embeddings via InsightFace + ONNX Runtime; `find --looks-like` / `face-search` sort by actual facial geometry
-- **Body similarity, three lenses** — `body-search --by build|volume|measurements`: skeletal proportions (MediaPipe pose), butt/thigh *fullness* (MediaPipe segmentation), or recorded WHR/hips/cup — all ranked against the cached index
+- **Body similarity, multi-modal** — `body-search` fuses **face + skeletal frame + silhouette curves + side projection (butt) + bust + recorded stats + height + build size** into one rank, or isolate a single lens with `--by overall|body|frame|curves|stats`. Because the visual vectors are scale-free, soft **height** and **build** (BMI) terms restore absolute size; `--height-tol N` adds a hard stature band ("same shape *and* same height")
+- **Footage extraction (#24)** — turn a performer's video clips into identity-gated, ML-filtered body vectors (especially the side-view projection stills miss); `apply_footage.py` + `refine_frames.py`
+- **Attribute tags** — a WD14 tagger annotates each performer with searchable traits (tattoos, piercings, hair, breast size…) for filters like *curvy **and** tattooed*
 - **Build similarity** — waist-to-hip ratio (WHR) + k-NN feature vectors; `find --body-like` matches physique, not just cup size
 - **Mix-and-match search** — `find --looks-like "A" --body-like "B"` combines one performer's face with another's build
 - **Multi-source images, quality-gated** — gathers from ThePornDB (profile + scene stills) + StashDB + pornpics, then rejects headshots/crops/non-standing frames so a bad image can't skew a result
@@ -198,26 +200,55 @@ luminary face-search "Naughty Alysha" [--limit 10] [--images]
 ```powershell
 pip install mediapipe   # one-time
 
-luminary body-search "Christina Sapphire" [--by build|volume|measurements] [--limit 10]
+luminary body-search "Dee Siren" [--by overall|body|frame|curves|stats] [--height-tol 8] [--limit 10]
 ```
 
 `body-search` ranks against the cached index. Pick the **lens** with `--by`:
 
-| `--by` | Signal | Source |
-|--------|--------|--------|
-| `build` *(default)* | skeletal proportions (shoulder/hip/leg) | MediaPipe **pose** |
-| `volume` | butt/thigh **fullness** the skeleton can't see | MediaPipe **segmentation** |
-| `measurements` | recorded WHR/hips/cup — **no images**, works for niche refs | the index's stored measurements |
+| `--by` | Signal |
+|--------|--------|
+| `overall` *(default)* | multi-modal blend: **face + frame + curves + proj + bust + stats + height + build** |
+| `body` | the same blend with **face excluded** — pure body-type match |
+| `frame` | skeletal proportions (shoulder/hip/leg), from MediaPipe **pose** |
+| `curves` | butt/thigh **fullness** the skeleton can't see, from MediaPipe **segmentation** |
+| `stats` | recorded WHR/hips/cup/height/weight — **no images**, works for niche refs |
 
-The two visual lenses (`build`, `volume`) build the reference's vector from a combined, **quality-gated** image pool (pornpics + ThePornDB scene stills + StashDB) — the gate rejects headshots, crops, and non-standing poses so a bad image can't fabricate a build. `measurements` needs no reference images at all.
+Each modality is **rank-normalised** before blending so they stay comparable, and the result shows a `%` per modality (`face / frame / curves / proj / bust / stats / height / build`).
+
+**Why `height` and `build`:** the visual vectors are **scale-free ratios**, so a tall or fuller-framed performer with the same proportions would score as high as a short/slim one. Two soft terms fix this — `height` (closeness of stature) and `build` (closeness of BMI — fuller vs slimmer frame) — so "build like X" returns bodies that actually *look* like X. For a hard constraint, **`--height-tol N`** drops candidates outside the reference's height ± N cm.
+
+The visual lenses build the reference's vector from a combined, **quality-gated** image pool (pornpics + ThePornDB scene stills + StashDB, plus any ingested footage) — the gate rejects headshots, crops, and non-standing poses so a bad image can't fabricate a build.
 
 ### Building the index
 
+The cached body index is built in three stages (all resumable):
+
 ```powershell
-luminary index [--limit 500] [--images 18] [--force]
+luminary index   [--limit 500] [--images 18] [--force]   # 1. roster: gather + gate full-body stills -> centroids
+luminary ingest  [names... | --roster] [--images 24]      # 2. per-image corpus: multi-angle, identity-gated, view-classified
+luminary aggregate [names...]                             # 3. roll the corpus into quality-weighted, view-aware vectors
 ```
 
-Precomputes both vectors (frame + shape) for a roster of the most-popular performers and caches them in SQLite. After this, `body-search` ranks against that rich pool **instantly** instead of fetching and embedding a fresh pool every run. One-time and **resumable** (re-run to continue; `--force` to rebuild). Without an index, `body-search` falls back to a smaller live StashDB pool.
+- **`index`** seeds a roster of the most-popular performers with pose + shape centroids.
+- **`ingest`** builds a richer per-image corpus: it gathers multi-angle images from every source, **verifies each face against a clean seed** (so a co-star can't pollute a performer's vectors), classifies each image's view (front/rear/side), quality-scores it, and stores pose/seg/face/**proj** vectors. `--roster` ingests everyone already in the index.
+- **`aggregate`** folds that corpus into the cached index — quality-weighted and view-aware (frontal frames feed pose/seg centroids; side frames feed the projection/bust vectors). Cheap and pure; re-run to re-tune without re-embedding.
+
+After this, `body-search` ranks against the index **instantly**. Without an index it falls back to a smaller live StashDB pool.
+
+**Footage (#24) & data quality** (Python scripts under `scripts/`):
+
+- `apply_footage.py` turns a performer's video clips into identity-gated, ML-refined body vectors — especially the **side-view projection** that stills rarely capture. `refine_frames.py` runs a WD14 tagger to drop sex-act / multi-person / close-up frames, keeping clean single-subject body displays.
+- `tag_profiles.py` writes per-performer **attribute tags** (`performer_tags` table) for trait search.
+- `fetch_iafd.py` overwrites unreliable StashDB measurements with authoritative IAFD data (name + ethnicity cross-checked, originals preserved).
+
+### Other commands
+
+```powershell
+luminary query blondes with a butt like Dee Siren   # plain-English search (local NL parser)
+luminary clusters                                    # detect + label your taste clusters (k-means)
+luminary eval                                        # offline ranking quality of the overall blend vs your liked set
+luminary similar "Seka Black"                        # ThePornDB similar-performer API
+```
 
 ### Settings
 
