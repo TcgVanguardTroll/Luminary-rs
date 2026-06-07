@@ -17,7 +17,8 @@ import urllib.request
 import cv2
 import numpy as np
 
-DB = r"C:\Users\TCGVANGUARDTROLL\AppData\Local\luminary\luminary.db"
+from _paths import db_path  # cross-platform DB location
+DB = db_path()
 UA = "Mozilla/5.0 (Luminary)"
 MIN_DET = 0.5
 

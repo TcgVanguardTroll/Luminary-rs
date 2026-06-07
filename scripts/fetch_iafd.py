@@ -20,7 +20,8 @@ import time
 import urllib.parse
 import urllib.request
 
-DB = r"C:\Users\TCGVANGUARDTROLL\AppData\Local\luminary\luminary.db"
+from _paths import db_path  # cross-platform DB location
+DB = db_path()
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 BASE = "https://www.iafd.com"
 

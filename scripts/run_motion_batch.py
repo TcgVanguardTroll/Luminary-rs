@@ -22,7 +22,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import motion_embed as me  # noqa: E402
 
 VID = {".mp4", ".ts", ".mov", ".avi", ".mkv", ".wmv", ".m4v", ".webm"}
-DB = r"C:\Users\TCGVANGUARDTROLL\AppData\Local\luminary\luminary.db"
+from _paths import db_path  # cross-platform DB location
+DB = db_path()
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "motion_dataset.json")
 
 

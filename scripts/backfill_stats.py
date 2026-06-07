@@ -26,8 +26,10 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-DB = r"C:\Users\TCGVANGUARDTROLL\AppData\Local\luminary\luminary.db"
-CFG = r"C:\Users\TCGVANGUARDTROLL\AppData\Local\luminary\config.json"
+from _paths import db_path  # cross-platform DB location
+DB = db_path()
+from _paths import config_path  # cross-platform config location
+CFG = config_path()
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backfill_stats.json")
 
 STASHDB = "https://stashdb.org/graphql"

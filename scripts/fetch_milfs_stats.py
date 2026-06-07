@@ -13,7 +13,8 @@ import time
 import urllib.parse
 import urllib.request
 
-CFG = r"C:\Users\TCGVANGUARDTROLL\AppData\Local\luminary\config.json"
+from _paths import config_path  # cross-platform config location
+CFG = config_path()
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "milfs_stats.json")
 cfg = json.load(open(CFG, encoding="utf-8"))
 STASH_KEY, TPDB_KEY = cfg["stashdb_key"], cfg["api_key"]

@@ -44,7 +44,8 @@ import body_embed as be  # noqa: E402
 from mediapipe.tasks import python as mp_python  # noqa: E402
 from mediapipe.tasks.python import vision  # noqa: E402
 
-DB = r"C:\Users\TCGVANGUARDTROLL\AppData\Local\luminary\luminary.db"
+from _paths import db_path  # cross-platform DB location
+DB = db_path()
 ROOT = r"D:\Gooniverse\Milfs"
 SEEDS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seeds.json")
 

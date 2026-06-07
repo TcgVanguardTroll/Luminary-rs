@@ -36,7 +36,8 @@ import mediapipe as mp  # noqa: E402
 from mediapipe.tasks import python as mp_python  # noqa: E402
 from mediapipe.tasks.python import vision  # noqa: E402
 
-DB = r"C:\Users\TCGVANGUARDTROLL\AppData\Local\luminary\luminary.db"
+from _paths import db_path  # cross-platform DB location
+DB = db_path()
 ROOT = r"D:\Gooniverse\Milfs"
 MODEL_DIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "wd14-tagger")
 

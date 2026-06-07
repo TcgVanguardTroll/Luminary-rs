@@ -10,7 +10,8 @@ import os
 import sqlite3
 import time
 
-DB = r"C:\Users\TCGVANGUARDTROLL\AppData\Local\luminary\luminary.db"
+from _paths import db_path  # cross-platform DB location
+DB = db_path()
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backfill_stats.json")
 
 

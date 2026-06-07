@@ -48,25 +48,54 @@ Face/body similarity is optional — all attribute commands work without Python.
 
 ## Installation
 
-```powershell
+Cross-platform — builds and runs on **macOS, Windows, and Linux**. The database
+and image cache live in the OS-standard data dir, resolved at runtime (no
+hardcoded paths): `~/Library/Application Support/luminary` on macOS,
+`%LOCALAPPDATA%\luminary` on Windows, `~/.local/share/luminary` on Linux.
+
+```bash
 git clone https://github.com/TcgVanguardTroll/Luminary-rs.git
 cd Luminary-rs
 cargo build --release
 ```
 
-Binary: `target/release/luminary.exe`
+Binary: `target/release/luminary` (`luminary.exe` on Windows).
 
-Set your API key (add to your profile to persist):
+### Put `luminary` on your PATH
+
+**Any OS (recommended)** — installs to `~/.cargo/bin`, already on PATH for Rust users:
+
+```bash
+cargo install --path .
+luminary --help
+```
+
+**macOS / Linux** — or add a function to `~/.zshrc` / `~/.bashrc`:
+
+```bash
+luminary() { "$HOME/Luminary-rs/target/release/luminary" "$@"; }
+```
+
+**Windows** — or add a function to your PowerShell `$PROFILE`:
 
 ```powershell
-$env:TPDB_API_KEY = "your-key-here"
+function luminary { & "$HOME\Luminary-rs\target\release\luminary.exe" @args }
+```
+
+### API key
+
+```bash
+export TPDB_API_KEY="your-key-here"      # macOS / Linux — add to ~/.zshrc to persist
+```
+```powershell
+$env:TPDB_API_KEY = "your-key-here"      # Windows — add to $PROFILE to persist
 ```
 
 ---
 
 ## Quick Start
 
-```powershell
+```bash
 # Add performers you like
 luminary add "Naughty Alysha" "Seka Black" "Dee Siren" "Lisa Ann"
 

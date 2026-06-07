@@ -10,7 +10,8 @@ import os
 import sqlite3
 import struct
 
-DB = r"C:\Users\TCGVANGUARDTROLL\AppData\Local\luminary\luminary.db"
+from _paths import db_path  # cross-platform DB location
+DB = db_path()
 ROOT = r"D:\Gooniverse\Milfs"
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seeds.json")
 
