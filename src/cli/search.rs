@@ -296,7 +296,12 @@ pub(crate) async fn body_search(
             flat.extend(imgs);
             ranges.push((start, flat.len()));
         }
-        let all = embed(&flat).unwrap_or_default();
+        // A sidecar failure here used to be swallowed (empty vec → every
+        // candidate filtered out → misleading "no results"). Surface it.
+        let all = embed(&flat).context(
+            "Body-embedding sidecar failed while embedding the candidate pool \
+             (transient — model load or image download). Re-run the search.",
+        )?;
         pool.into_iter()
             .zip(ranges)
             .filter_map(|(p, (s, e))| {
