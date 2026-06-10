@@ -4,6 +4,11 @@ on:
   push:
     branches: [ master ]
   pull_request:
+  # Weekly drift check: the toolchain is installed as @stable, so new clippy
+  # lints / rustfmt rules can break CI with zero pushes (it happened — see
+  # PR #1). Run Mondays so the breakage surfaces on master, not mid-PR.
+  schedule:
+    - cron: "0 9 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
